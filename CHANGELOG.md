@@ -30,3 +30,8 @@ Built under the Universal SDLC (Standard tier). Source ledger: `股票 2023.xlsx
 ### Known data items (fix in the source sheet)
 - 14 held lots with blank `股數` (京元電子/仲琦/友達/長榮) — surfaced in the dashboard's data-review notice, not valued.
 - 7 held tickers need TWSE codes for live pricing (台達電/康舒/星宇航空/晶心科/晶電/瑞昱/華邦電).
+
+### Published (2026-07-10) — GitHub Pages
+- Live at https://llffhh.github.io/portfolio-dashboard/ (repo: llffhh/portfolio-dashboard, public).
+- Key-entry model: no secret in the repo; `src/settings.js` resolves config from gitignored `config.js` (dev) or browser localStorage via an in-page setup form (Pages). Verified on the live site: setup form → key saved → real data renders (ROI 123.73%, XIRR 19.35%).
+- `.gitignore` hardened: real data (`data/`, xlsx, csv, root json), `config.js`, and local tooling excluded; verified nothing sensitive in the initial commit; `config.js` returns 404 on the live site.
