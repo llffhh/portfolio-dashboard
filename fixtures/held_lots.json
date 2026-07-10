@@ -1,0 +1,23 @@
+[
+  {
+    "date": "2020-01-05",
+    "ticker": "台積電",
+    "shares": 1000,
+    "buyPrice": 300,
+    "cost": 300428
+  },
+  {
+    "date": "2021-05-10",
+    "ticker": "鴻海",
+    "shares": 2000,
+    "buyPrice": 100,
+    "cost": 200285
+  },
+  {
+    "date": "2022-03-15",
+    "ticker": "友達",
+    "shares": null,
+    "buyPrice": null,
+    "cost": 50000
+  }
+]

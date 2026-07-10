@@ -1,0 +1,17 @@
+config.js
+node_modules/
+
+# Real portfolio data - NEVER publish (public GitHub Pages repo)
+data/
+*.xlsx
+/transactions.json
+/dividends.json
+*.csv
+
+# Local tooling
+.claude/
+.gemini/
+.geminiinstructions/
+.geminiworkflows/
+gemini_*.log
+_tmp*

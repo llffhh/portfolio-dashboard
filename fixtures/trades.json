@@ -1,0 +1,23 @@
+[
+  {
+    "date": "2020-01-05",
+    "type": "buy",
+    "ticker": "台積電",
+    "shares": 1000,
+    "amount": 300428
+  },
+  {
+    "date": "2020-06-01",
+    "type": "sell",
+    "ticker": "台積電",
+    "shares": 500,
+    "amount": 160000
+  },
+  {
+    "date": "2021-05-10",
+    "type": "buy",
+    "ticker": "鴻海",
+    "shares": 2000,
+    "amount": 200285
+  }
+]

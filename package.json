@@ -1,0 +1,17 @@
+{
+  "name": "stockanalysis",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "vitest": "^2.1.0",
+    "chart.js": "^4.4.0"
+  }
+}
