@@ -24,6 +24,21 @@ SRC = "股票 2023.xlsx"
 DIV = "股息"
 os.makedirs("data", exist_ok=True)
 
+KNOW_CODES = {
+    "台達電": "2308",
+    "國產": "2504",
+    "康舒": "6282",
+    "星宇航空": "2646",
+    "晶心科": "6533",
+    "晶電": "2448",
+    "瑞昱": "2379",
+    "統懋": "2434",
+    "花王": "8906",
+    "華冠": "8101",
+    "華邦電": "2344",
+    "錦明": "3230",
+}
+
 
 def load_ledger():
     df = pd.read_excel(SRC, sheet_name="股票明細", header=1).dropna(how="all")
@@ -70,6 +85,9 @@ def extract(df):
         if str(r["尚未交易"]).upper().startswith("Y") and pd.notna(ticker) and not is_div:
             held.append({"date": d, "ticker": str(ticker), "shares": num(r["股數"]),
                          "buyPrice": num(r["股價"]), "cost": float(num(r["目前投資金額"]) or 0)})
+    # Merge known codes
+    for name, code in KNOW_CODES.items():
+        name2code.setdefault(name, code)
     return held, trades, deposits, divs, name2code
 
 
@@ -104,10 +122,35 @@ def write_normalized(held, trades, deposits, divs, codes):
         for c in ws[1]: c.font = bold
         pd.DataFrame(rows, columns=cols).to_csv(f"data/{name}.csv", index=False, encoding="utf-8-sig")
 
-    wp = wb.create_sheet("Prices"); wp.append(["ticker", "code", "price"])
-    for tk in sorted(holdings(held)):
+    # Extract all active years from the dataset to generate year-end columns
+    all_dates = [x["date"] for x in held + trades + deposits + divs if "date" in x]
+    years = sorted(list(set(int(d[:4]) for d in all_dates if len(d) >= 4 and d[:4].isdigit())))
+    from datetime import date
+    current_year = date.today().year
+    years = [y for y in years if 2010 <= y <= current_year]
+    year_cols = [f"{y}-12-31" for y in years]
+
+    wp = wb.create_sheet("Prices")
+    wp.append(["ticker", "code", "price", "closeyest"] + year_cols)
+
+    for r_idx, tk in enumerate(sorted(holdings(held)), start=2):
         code = codes.get(tk)
-        wp.append([tk, code or "", f'=IFERROR(GOOGLEFINANCE("TPE:{code}"),"")' if code else ""])
+        row_data = [tk, code or ""]
+        if code:
+            row_data.append(f'=IFERROR(GOOGLEFINANCE("TPE:{code}"), GET_TAIWAN_STOCK_PRICE("{code}"))')
+            row_data.append(f'=IFERROR(GOOGLEFINANCE("TPE:"&$B{r_idx},"closeyest"), GET_TAIWAN_STOCK_PRICE($B{r_idx}, "closeyest"))')
+            for y in years:
+                row_data.append(
+                    f'=IFERROR(INDEX(GOOGLEFINANCE("TPE:"&$B{r_idx},"close",DATE({y},12,31)),2,2), '
+                    f'GET_TAIWAN_STOCK_PRICE($B{r_idx}, "{y}-12-31"))'
+                )
+        else:
+            row_data.append("")
+            row_data.append("")
+            for y in years:
+                row_data.append("")
+        wp.append(row_data)
+
     for c in wp[1]: c.font = bold
     wb.save("portfolio_normalized.xlsx")
 

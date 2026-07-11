@@ -97,3 +97,21 @@ One test per clause / error-taxonomy entry / invariant in §A; label each with i
 - All 4 feedback items fully addressed.
 - Vitest suite (17 tests) runs and passes successfully.
 
+
+### Iteration 3 — 2026-07-11 (Historical Price Automation)
+**Triggered by:** user request to automate missing historical stock prices
+
+**Actions taken:**
+- Defined `KNOW_CODES` mapping in `extract.py` to resolve missing TWSE codes for known stock tickers (e.g. `台達電` -> `2308`, `瑞昱` -> `2379`, etc.).
+- Modified `write_normalized` in `extract.py` to extract all unique years from transactions/dividends and dynamically add year-end columns (`YYYY-12-31`) to the `Prices` tab.
+- Programmed automatic Excel formulas for `price` and year-end close (`=IFERROR(INDEX(GOOGLEFINANCE(...), 2, 2), "")`) to automatically fetch historical prices upon Google Sheets import.
+- Ran `extract.py` successfully (all 46 held tickers now map to TWSE codes, resolving the missing code notice).
+- Ran all 21 Vitest tests and verified they still pass.
+
+**Deviations from plan:**
+- None.
+
+**Flagged for Auditor (Claude):**
+- Tickers that were sold in the past and are not currently held are excluded from the `Prices` tab. This is a known limitation from rev 3.2.
+
+

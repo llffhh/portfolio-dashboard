@@ -124,3 +124,83 @@ function getPricesFromSheet(tickers, dates) {
   }
   return priceMap;
 }
+
+/**
+ * Fetches current or historical price for Taiwan stock from Yahoo Finance.
+ * Supports both TWSE (.TW) and TPEx (.TWO) stocks.
+ * @param {string} code Ticker code (e.g., "8299" or "2330")
+ * @param {string} dateStr Optional date string "YYYY-MM-DD" for historical price. If omitted, returns current price.
+ * @return {number} The stock price.
+ * @customfunction
+ */
+function GET_TAIWAN_STOCK_PRICE(code, dateStr) {
+  if (!code) return "";
+  code = String(code).trim();
+  
+  // Try both .TW and .TWO symbols
+  var symbols = [code + ".TW", code + ".TWO"];
+  var price = null;
+  
+  // Determine date window if dateStr is provided
+  var period1, period2;
+  var isYesterday = false;
+  if (dateStr) {
+    if (String(dateStr).trim().toLowerCase() === "closeyest") {
+      isYesterday = true;
+    } else {
+      var date = new Date(dateStr);
+      // Use a 5-day window ending on the target date to ensure we hit a trading day (handles weekends)
+      period2 = Math.floor(date.getTime() / 1000) + 86400; // end date (exclusive in Yahoo)
+      period1 = period2 - (5 * 86400); // 5 days back
+    }
+  }
+  
+  for (var i = 0; i < symbols.length; i++) {
+    var symbol = symbols[i];
+    var url = "https://query1.finance.yahoo.com/v8/finance/chart/" + symbol;
+    if (dateStr && !isYesterday) {
+      url += "?period1=" + period1 + "&period2=" + period2 + "&interval=1d";
+    }
+    
+    try {
+      var response = UrlFetchApp.fetch(url, {
+        muteHttpExceptions: true,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+      });
+      
+      if (response.getResponseCode() === 200) {
+        var json = JSON.parse(response.getContentText());
+        var result = json.chart && json.chart.result && json.chart.result[0];
+        if (result) {
+          if (dateStr) {
+            if (isYesterday) {
+              price = result.meta.chartPreviousClose || result.meta.previousClose;
+            } else {
+              var indicators = result.indicators && result.indicators.quote && result.indicators.quote[0];
+              var closePrices = indicators && indicators.close;
+              if (closePrices && closePrices.length > 0) {
+                // Find the last non-null close price in the period window
+                for (var j = closePrices.length - 1; j >= 0; j--) {
+                  if (closePrices[j] != null) {
+                    price = closePrices[j];
+                    break;
+                  }
+                }
+              }
+            }
+          } else {
+            price = result.meta.regularMarketPrice;
+          }
+        }
+      }
+    } catch (e) {
+      // Ignore and try the next symbol
+    }
+    
+    if (price !== null) break;
+  }
+  
+  return price !== null ? price : "";
+}
