@@ -22,6 +22,25 @@
     th { background: #fafafa; font-weight: 600; color: #555; }
     .notice { background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin-bottom: 20px; border-radius: 4px; display: none; }
     .notice.visible { display: block; }
+    .btn-toggle {
+      padding: 6px 12px;
+      border: 1px solid #d1d5db;
+      background: white;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 600;
+      color: #374151;
+      transition: all 0.2s;
+    }
+    .btn-toggle:hover {
+      background: #f3f4f6;
+    }
+    .btn-toggle.active {
+      background: #3b82f6;
+      color: white;
+      border-color: #3b82f6;
+    }
   </style>
 </head>
 <body>
@@ -69,7 +88,13 @@
 
     <div class="charts">
       <div class="chart-container">
-        <h3>Portfolio Value Over Time</h3>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+          <h3 style="margin: 0;">Portfolio Value Over Time</h3>
+          <div style="display: flex; gap: 8px;">
+            <button id="toggle-yearly" class="btn-toggle active">Yearly</button>
+            <button id="toggle-daily" class="btn-toggle">Daily</button>
+          </div>
+        </div>
         <canvas id="valueChart"></canvas>
       </div>
       <div class="chart-container">

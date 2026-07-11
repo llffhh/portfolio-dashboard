@@ -53,6 +53,14 @@ export class LocalJsonSource {
       (typeof r.code === 'string' || r.code === null)
     );
   }
+
+  async loadDailyHistory() {
+    try {
+      return await this._readJson('daily_history.json');
+    } catch (e) {
+      return [];
+    }
+  }
 }
 
 export class MockPriceSource {

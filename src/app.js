@@ -62,11 +62,12 @@ async function init() {
   }
 
   try {
-    const [lots, trades, deposits, divs] = await Promise.all([
+    const [lots, trades, deposits, divs, dailyHistory] = await Promise.all([
       dataSource.loadHeldLots(),
       dataSource.loadTrades(),
       dataSource.loadDeposits(),
-      dataSource.loadDividends()
+      dataSource.loadDividends(),
+      dataSource.loadDailyHistory()
     ]);
 
     const { holdings, reviewLots } = currentHoldings(lots);
@@ -206,14 +207,20 @@ async function init() {
         `<li>No historical price for some year-ends (those tickers excluded from past values): ${[...histMissing].join(', ')}</li>`;
     }
 
+    const yearlySeries = series;
+    const dailySeries = (dailyHistory && dailyHistory.length > 0)
+      ? dailyHistory.map(d => ({ date: normalizeDateKey(d.date), value: Number(d.value) })).sort((a, b) => new Date(a.date) - new Date(b.date))
+      : [];
+
+    let valueChartInstance = null;
     try {
-      new Chart(document.getElementById('valueChart'), {
+      valueChartInstance = new Chart(document.getElementById('valueChart'), {
         type: 'line',
         data: {
-          labels: series.map(d => d.date),
+          labels: yearlySeries.map(d => d.date),
           datasets: [{
             label: 'Portfolio Value',
-            data: series.map(d => d.value),
+            data: yearlySeries.map(d => d.value),
             borderColor: '#10b981',
             tension: 0.1,
             fill: false
@@ -222,6 +229,34 @@ async function init() {
       });
     } catch (e) {
       console.warn("Could not render value chart", e);
+    }
+
+    const btnYearly = document.getElementById('toggle-yearly');
+    const btnDaily = document.getElementById('toggle-daily');
+
+    if (dailySeries.length === 0) {
+      btnDaily.disabled = true;
+      btnDaily.style.opacity = '0.3';
+      btnDaily.title = 'No daily history found. Run backfillDailySnapshots in Apps Script.';
+    } else {
+      btnDaily.addEventListener('click', () => {
+        btnYearly.classList.remove('active');
+        btnDaily.classList.add('active');
+        if (valueChartInstance) {
+          valueChartInstance.data.labels = dailySeries.map(d => d.date);
+          valueChartInstance.data.datasets[0].data = dailySeries.map(d => d.value);
+          valueChartInstance.update();
+        }
+      });
+      btnYearly.addEventListener('click', () => {
+        btnDaily.classList.remove('active');
+        btnYearly.classList.add('active');
+        if (valueChartInstance) {
+          valueChartInstance.data.labels = yearlySeries.map(d => d.date);
+          valueChartInstance.data.datasets[0].data = yearlySeries.map(d => d.value);
+          valueChartInstance.update();
+        }
+      });
     }
 
     // MET-11: invested capital per year + cumulative overlay

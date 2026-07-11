@@ -33,7 +33,7 @@ function doGet(e) {
         .setMimeType(ContentService.MimeType.JSON);
     }
     
-    if (['heldlots', 'trades', 'deposits', 'dividends'].includes(resource)) {
+    if (['heldlots', 'trades', 'deposits', 'dividends', 'dailyhistory'].includes(resource)) {
       const data = getSheetData(resource);
       return ContentService.createTextOutput(JSON.stringify(data))
         .setMimeType(ContentService.MimeType.JSON);
@@ -54,7 +54,8 @@ function getSheetData(resource) {
     'heldlots': 'HeldLots',
     'trades': 'Trades',
     'deposits': 'Deposits',
-    'dividends': 'Dividends'
+    'dividends': 'Dividends',
+    'dailyhistory': 'DailyHistory'
   };
   const sheet = ss.getSheetByName(tabNameMap[resource]);
   if (!sheet) return [];
@@ -203,4 +204,252 @@ function GET_TAIWAN_STOCK_PRICE(code, dateStr) {
   }
   
   return price !== null ? price : "";
+}
+
+/**
+ * Calculates current portfolio value and appends it to the DailyHistory sheet.
+ * Cleans up rows older than 365 days to maintain a rolling 1-year window.
+ */
+function recordDailySnapshot() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  
+  // 1. Get current portfolio value
+  const heldLotsSheet = ss.getSheetByName('HeldLots');
+  if (!heldLotsSheet) return;
+  const heldLotsData = heldLotsSheet.getDataRange().getValues();
+  if (heldLotsData.length <= 1) return;
+  
+  const holdings = {};
+  const headers = heldLotsData[0];
+  const tickerCol = headers.indexOf('ticker');
+  const sharesCol = headers.indexOf('shares');
+  
+  for (let i = 1; i < heldLotsData.length; i++) {
+    const row = heldLotsData[i];
+    const ticker = row[tickerCol];
+    const shares = Number(row[sharesCol]);
+    if (ticker && !isNaN(shares)) {
+      holdings[ticker] = (holdings[ticker] || 0) + shares;
+    }
+  }
+  
+  const pricesSheet = ss.getSheetByName('Prices');
+  if (!pricesSheet) return;
+  const pricesData = pricesSheet.getDataRange().getValues();
+  if (pricesData.length <= 1) return;
+  
+  const priceHeaders = pricesData[0];
+  const priceTickerCol = priceHeaders.indexOf('ticker');
+  const priceValCol = priceHeaders.indexOf('price');
+  
+  var totalValue = 0;
+  for (let i = 1; i < pricesData.length; i++) {
+    const row = pricesData[i];
+    const ticker = row[priceTickerCol];
+    const price = Number(row[priceValCol]);
+    if (ticker && holdings[ticker] !== undefined && !isNaN(price)) {
+      totalValue += holdings[ticker] * price;
+    }
+  }
+  
+  // 2. Write to DailyHistory
+  let historySheet = ss.getSheetByName('DailyHistory');
+  if (!historySheet) {
+    historySheet = ss.insertSheet('DailyHistory');
+    historySheet.appendRow(['date', 'value']);
+  }
+  
+  const tz = ss.getSpreadsheetTimeZone() || Session.getScriptTimeZone() || 'Asia/Taipei';
+  const today = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+  
+  const historyData = historySheet.getDataRange().getValues();
+  let foundRow = -1;
+  for (let i = 1; i < historyData.length; i++) {
+    let dateVal = historyData[i][0];
+    if (dateVal instanceof Date) {
+      dateVal = Utilities.formatDate(dateVal, tz, 'yyyy-MM-dd');
+    }
+    if (dateVal === today) {
+      foundRow = i + 1;
+      break;
+    }
+  }
+  
+  if (foundRow !== -1) {
+    historySheet.getRange(foundRow, 2).setValue(totalValue);
+  } else {
+    historySheet.appendRow([today, totalValue]);
+  }
+  
+  // 3. Keep rolling 365 days (delete older rows)
+  if (historySheet.getLastRow() > 2) {
+    historySheet.getRange(2, 1, historySheet.getLastRow() - 1, historySheet.getLastColumn()).sort({column: 1, ascending: true});
+  }
+  const maxRows = 366; // header + 365 days
+  const lastRow = historySheet.getLastRow();
+  if (lastRow > maxRows) {
+    const rowsToDelete = lastRow - maxRows;
+    historySheet.deleteRows(2, rowsToDelete);
+  }
+}
+
+/**
+ * Reconstructs daily snapshots starting from monthsAgo months ago and writes to DailyHistory sheet.
+ * @param {number} monthsAgo Number of months to backfill (default 3)
+ */
+function backfillDailySnapshots(monthsAgo) {
+  monthsAgo = monthsAgo || 3;
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  
+  // 1. Determine date range
+  const tz = ss.getSpreadsheetTimeZone() || Session.getScriptTimeZone() || 'Asia/Taipei';
+  const now = new Date();
+  const startDate = new Date();
+  startDate.setMonth(now.getMonth() - monthsAgo);
+  
+  const dates = [];
+  let curr = new Date(startDate);
+  while (curr <= now) {
+    dates.push(Utilities.formatDate(new Date(curr), tz, 'yyyy-MM-dd'));
+    curr.setDate(curr.getDate() + 1);
+  }
+  
+  // 2. Load Trades
+  const tradesSheet = ss.getSheetByName('Trades');
+  if (!tradesSheet) return;
+  const tradesData = tradesSheet.getDataRange().getValues();
+  if (tradesData.length <= 1) return;
+  
+  const tradesHeaders = tradesData[0];
+  const tDateCol = tradesHeaders.indexOf('date');
+  const tTypeCol = tradesHeaders.indexOf('type');
+  const tTickerCol = tradesHeaders.indexOf('ticker');
+  const tSharesCol = tradesHeaders.indexOf('shares');
+  
+  const trades = [];
+  for (let i = 1; i < tradesData.length; i++) {
+    const row = tradesData[i];
+    let dVal = row[tDateCol];
+    if (dVal instanceof Date) dVal = Utilities.formatDate(dVal, tz, 'yyyy-MM-dd');
+    trades.push({
+      date: dVal,
+      type: row[tTypeCol],
+      ticker: row[tTickerCol],
+      shares: Number(row[tSharesCol])
+    });
+  }
+  
+  // 3. Load all tickers and fetch their historical close prices
+  const tickers = [];
+  const pricesSheet = ss.getSheetByName('Prices');
+  if (!pricesSheet) return;
+  const pricesData = pricesSheet.getDataRange().getValues();
+  for (let i = 1; i < pricesData.length; i++) {
+    const code = pricesData[i][1];
+    if (code) tickers.push(pricesData[i][0]);
+  }
+  
+  const period1 = Math.floor(startDate.getTime() / 1000);
+  const period2 = Math.floor(now.getTime() / 1000);
+  
+  const priceMap = {};
+  const nameToCode = {};
+  for (let i = 1; i < pricesData.length; i++) {
+    const name = pricesData[i][0];
+    const code = pricesData[i][1];
+    if (name && code) nameToCode[name] = code;
+  }
+  
+  for (const name of tickers) {
+    const code = nameToCode[name];
+    if (!code) continue;
+    
+    priceMap[name] = {};
+    const symbols = [code + ".TW", code + ".TWO"];
+    let success = false;
+    
+    for (const symbol of symbols) {
+      const url = "https://query1.finance.yahoo.com/v8/finance/chart/" + symbol + "?period1=" + period1 + "&period2=" + period2 + "&interval=1d";
+      try {
+        const response = UrlFetchApp.fetch(url, {
+          muteHttpExceptions: true,
+          headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
+        });
+        
+        if (response.getResponseCode() === 200) {
+          const json = JSON.parse(response.getContentText());
+          const result = json.chart && json.chart.result && json.chart.result[0];
+          if (result && result.timestamp) {
+            const timestamps = result.timestamp;
+            const closePrices = result.indicators && result.indicators.quote && result.indicators.quote[0] && result.indicators.quote[0].close;
+            if (closePrices) {
+              for (let j = 0; j < timestamps.length; j++) {
+                const dateStr = Utilities.formatDate(new Date(timestamps[j] * 1000), tz, 'yyyy-MM-dd');
+                const price = closePrices[j];
+                if (price != null) priceMap[name][dateStr] = price;
+              }
+              success = true;
+            }
+          }
+        }
+      } catch (e) {
+        // Ignore
+      }
+      if (success) break;
+    }
+  }
+  
+  // 4. Reconstruct holdings & calculate value for each date
+  let historySheet = ss.getSheetByName('DailyHistory');
+  if (!historySheet) {
+    historySheet = ss.insertSheet('DailyHistory');
+    historySheet.appendRow(['date', 'value']);
+  } else {
+    historySheet.clear();
+    historySheet.appendRow(['date', 'value']);
+  }
+  
+  const dailyValues = [];
+  
+  for (const date of dates) {
+    const holdings = {};
+    for (const trade of trades) {
+      if (trade.date <= date) {
+        holdings[trade.ticker] = (holdings[trade.ticker] || 0) + (trade.type === 'buy' ? trade.shares : -trade.shares);
+      }
+    }
+    
+    let totalValue = 0;
+    let hasPricedStock = false;
+    
+    for (const [ticker, shares] of Object.entries(holdings)) {
+      if (shares <= 0) continue;
+      
+      let price = null;
+      let checkDate = new Date(date);
+      for (let lookback = 0; lookback < 10; lookback++) {
+        const dStr = Utilities.formatDate(checkDate, tz, 'yyyy-MM-dd');
+        if (priceMap[ticker] && priceMap[ticker][dStr] !== undefined) {
+          price = priceMap[ticker][dStr];
+          break;
+        }
+        checkDate.setDate(checkDate.getDate() - 1);
+      }
+      
+      if (price !== null) {
+        totalValue += shares * price;
+        hasPricedStock = true;
+      }
+    }
+    
+    if (hasPricedStock) {
+      dailyValues.push([date, Math.round(totalValue)]);
+    }
+  }
+  
+  if (dailyValues.length > 0) {
+    historySheet.getRange(2, 1, dailyValues.length, 2).setValues(dailyValues);
+  }
+  
+  Logger.log("Backfilled " + dailyValues.length + " daily snapshots!");
 }

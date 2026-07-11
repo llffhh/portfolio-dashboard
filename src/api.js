@@ -20,6 +20,7 @@ export class AppsScriptSource {
   async loadTrades() { return this._fetch('trades'); }
   async loadDeposits() { return this._fetch('deposits'); }
   async loadDividends() { return this._fetch('dividends'); }
+  async loadDailyHistory() { return this._fetch('dailyhistory'); }
 }
 
 // The GAS V8 runtime can serve Date headers as raw strings like
