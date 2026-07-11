@@ -62,13 +62,19 @@ async function init() {
   }
 
   try {
-    const [lots, trades, deposits, divs, dailyHistory] = await Promise.all([
+    const [lots, trades, deposits, divs] = await Promise.all([
       dataSource.loadHeldLots(),
       dataSource.loadTrades(),
       dataSource.loadDeposits(),
-      dataSource.loadDividends(),
-      dataSource.loadDailyHistory()
+      dataSource.loadDividends()
     ]);
+
+    let dailyHistory = [];
+    try {
+      dailyHistory = await dataSource.loadDailyHistory();
+    } catch (e) {
+      console.warn("Could not load daily history", e);
+    }
 
     const { holdings, reviewLots } = currentHoldings(lots);
     const cost = costOfHoldings(lots);
