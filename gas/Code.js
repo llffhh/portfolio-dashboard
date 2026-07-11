@@ -361,12 +361,22 @@ function backfillDailySnapshots(monthsAgo) {
   }
   
   for (const name of tickers) {
-    const code = nameToCode[name];
+    let code = nameToCode[name];
     if (!code) continue;
+    
+    // Normalize code exactly like GET_TAIWAN_STOCK_PRICE does
+    if (typeof code === 'number') {
+      code = code.toFixed(0);
+    }
+    code = String(code).trim();
+    if (code.length === 2) code = "00" + code;
+    if (code.length === 3) code = "0" + code;
     
     priceMap[name] = {};
     const symbols = [code + ".TW", code + ".TWO"];
     let success = false;
+    
+    Utilities.sleep(200); // Sleep 200ms to avoid Yahoo Finance rate-limiting
     
     for (const symbol of symbols) {
       const url = "https://query1.finance.yahoo.com/v8/finance/chart/" + symbol + "?period1=" + period1 + "&period2=" + period2 + "&interval=1d";
@@ -396,6 +406,10 @@ function backfillDailySnapshots(monthsAgo) {
         // Ignore
       }
       if (success) break;
+    }
+    
+    if (!success) {
+      Logger.log("Failed to fetch historical prices for ticker: " + name + " (code: " + code + ")");
     }
   }
   

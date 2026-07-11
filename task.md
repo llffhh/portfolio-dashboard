@@ -112,6 +112,7 @@ One test per clause / error-taxonomy entry / invariant in §A; label each with i
 - Implemented client-side column sorting for the Current Holdings table in `src/app.js` with visual ascending/descending arrow indicators.
 - Added `DailyHistory` sheet tab integration and Web API `?resource=dailyhistory` resource mapping.
 - Wrote `recordDailySnapshot()` (daily snapshot cron) and `backfillDailySnapshots(monthsAgo)` (3-month backfiller utilizing batch historical Yahoo Finance chart requests and historical holdings reconstruction) in `gas/Code.js`.
+- Improved stock code string normalization (integer trimming, leading-zero padding), added a 200ms sleep delay between requests to avoid rate-limiting, and added log reporting to diagnostic failed Yahoo requests in `backfillDailySnapshots`.
 - Added Yearly/Daily toggle selection buttons to `index.html` and wired chart update listeners in `src/app.js` to swap datasets dynamically.
 - Ran `extract.py` successfully and verified all 21 Vitest tests pass.
 
