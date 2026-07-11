@@ -278,10 +278,70 @@ async function init() {
       `;
     }
 
+    makeTableSortable('holdingsTable');
+
   } catch (err) {
     console.error("Dashboard Init Error", err);
     document.body.innerHTML += `<div style="color:red; padding: 20px;">Error loading dashboard: ${err.message}</div>`;
   }
+}
+
+function makeTableSortable(tableId) {
+  const table = document.getElementById(tableId);
+  if (!table) return;
+  const headers = table.querySelectorAll('thead th');
+  const tbody = table.querySelector('tbody');
+  if (!tbody) return;
+  
+  let currentSortCol = -1;
+  let isAsc = true;
+  
+  headers.forEach((header, index) => {
+    header.style.cursor = 'pointer';
+    header.style.userSelect = 'none';
+    
+    header.addEventListener('click', () => {
+      const rows = Array.from(tbody.querySelectorAll('tr'));
+      if (rows.length === 0) return;
+      
+      if (currentSortCol === index) {
+        isAsc = !isAsc;
+      } else {
+        isAsc = true;
+        currentSortCol = index;
+      }
+      
+      // Reset indicators on other headers
+      headers.forEach(h => h.innerHTML = h.innerHTML.replace(/ [▲▼]$/, ''));
+      header.innerHTML += isAsc ? ' ▲' : ' ▼';
+      
+      rows.sort((rowA, rowB) => {
+        if (!rowA.cells[index] || !rowB.cells[index]) return 0;
+        const cellA = rowA.cells[index].innerText;
+        const cellB = rowB.cells[index].innerText;
+        
+        const clean = str => {
+          let val = str.replace(/[,\s%▲▼]/g, '').trim();
+          if (val === 'N/A') return -Infinity; // Keep N/A grouped at bottom
+          return isNaN(Number(val)) ? str.toLowerCase() : Number(val);
+        };
+        
+        const valA = clean(cellA);
+        const valB = clean(cellB);
+        
+        if (typeof valA === 'number' && typeof valB === 'number') {
+          return isAsc ? valA - valB : valB - valA;
+        } else {
+          return isAsc 
+            ? String(valA).localeCompare(String(valB)) 
+            : String(valB).localeCompare(String(valA));
+        }
+      });
+      
+      tbody.innerHTML = '';
+      rows.forEach(row => tbody.appendChild(row));
+    });
+  });
 }
 
 init();
