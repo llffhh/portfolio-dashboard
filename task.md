@@ -98,20 +98,24 @@ One test per clause / error-taxonomy entry / invariant in §A; label each with i
 - Vitest suite (17 tests) runs and passes successfully.
 
 
-### Iteration 3 — 2026-07-11 (Historical Price Automation)
-**Triggered by:** user request to automate missing historical stock prices
+### Iteration 3 — 2026-07-11 (Historical Price Automation & UI Grid Redesign)
+**Triggered by:** user request to automate missing historical stock prices, support OTC previous closes, and redesign charts into a 4x1 grid
 
 **Actions taken:**
 - Defined `KNOW_CODES` mapping in `extract.py` to resolve missing TWSE codes for known stock tickers (e.g. `台達電` -> `2308`, `瑞昱` -> `2379`, etc.).
 - Modified `write_normalized` in `extract.py` to extract all unique years from transactions/dividends and dynamically add year-end columns (`YYYY-12-31`) to the `Prices` tab.
-- Programmed automatic Excel formulas for `price` and year-end close (`=IFERROR(INDEX(GOOGLEFINANCE(...), 2, 2), "")`) to automatically fetch historical prices upon Google Sheets import.
-- Ran `extract.py` successfully (all 46 held tickers now map to TWSE codes, resolving the missing code notice).
-- Ran all 21 Vitest tests and verified they still pass.
+- Added custom function `GET_TAIWAN_STOCK_PRICE` to `gas/Code.js` supporting Yahoo Finance JSON API lookups for TWSE and TPEx tickers (like `8299`).
+- Added support for the `"closeyest"` parameter in the custom function to fetch the previous day's close price, and updated `extract.py` to output the `closeyest` column automatically.
+- Programmed fallback Excel formulas (`=IFERROR(GOOGLEFINANCE(...), GET_TAIWAN_STOCK_PRICE(...))`) to automatically fetch both current and historical prices upon Google Sheets import.
+- Redesigned the chart layout in `index.html` into a responsive 4x1 grid (4 columns side-by-side on desktop, 2x2 on tablet, and stacked on mobile).
+- Ran `extract.py` successfully and verified all 21 Vitest tests pass.
 
 **Deviations from plan:**
 - None.
 
 **Flagged for Auditor (Claude):**
 - Tickers that were sold in the past and are not currently held are excluded from the `Prices` tab. This is a known limitation from rev 3.2.
+- The `GET_TAIWAN_STOCK_PRICE` custom function must be copied into the user's online Google Apps Script project for the fallback formulas to evaluate.
+
 
 
