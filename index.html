@@ -35,6 +35,16 @@
 
     <div class="grid">
       <div class="card">
+        <h3>Current Value</h3>
+        <div class="value" id="val-current">-</div>
+        <div class="label" id="val-delta"></div>
+      </div>
+      <div class="card">
+        <h3>Yesterday Close Value</h3>
+        <div class="value" id="val-yesterday">-</div>
+        <div class="label">previous trading day</div>
+      </div>
+      <div class="card">
         <h3>Invested Capital</h3>
         <div class="value" id="val-invested">-</div>
       </div>
@@ -68,6 +78,17 @@
       </div>
     </div>
 
+    <div class="charts">
+      <div class="chart-container">
+        <h3>Invested Capital per Year</h3>
+        <canvas id="investedChart"></canvas>
+      </div>
+      <div class="chart-container">
+        <h3>Yearly P/L — excl. dividends</h3>
+        <canvas id="pnlChart"></canvas>
+      </div>
+    </div>
+
     <h3>Current Holdings</h3>
     <table id="holdingsTable">
       <thead>
@@ -93,6 +114,6 @@
     <button id="setup-save" style="margin-top:16px; padding:10px 20px; background:#3b82f6; color:#fff; border:none; border-radius:6px; cursor:pointer;">Save &amp; load dashboard</button>
   </div>
 
-  <script type="module" src="src/app.js?v=3"></script>
+  <script type="module" src="src/app.js?v=5"></script>
 </body>
 </html>

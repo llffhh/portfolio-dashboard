@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
-import { AppsScriptSource, AppsScriptPriceSource } from '../src/api.js';
+import { AppsScriptSource, AppsScriptPriceSource, normalizeDateKey } from '../src/api.js';
 
 const TEST_CFG = { WEBAPP_URL: 'https://script.test/exec', API_KEY: 'testkey' };
 
@@ -47,6 +47,22 @@ describe('Unit Tests: Apps Script Integration', () => {
     const prices = await source.getPrices(['A'], ['2023-12-31']);
     expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('resource=prices&tickers=A&dates=2023-12-31'));
     expect(prices).toEqual({ 'A': { '2023-12-31': 100 } });
+  });
+
+  it('normalizeDateKey converts raw GAS date strings to yyyy-MM-dd', () => {
+    expect(normalizeDateKey('Sun Dec 31 2017 08:00:00 GMT+0800 (台北標準時間)')).toBe('2017-12-31');
+    expect(normalizeDateKey('2024-12-31')).toBe('2024-12-31');
+    expect(normalizeDateKey('closeyest')).toBe('closeyest');
+  });
+
+  it('AppsScriptPriceSource normalizes raw date keys in responses', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ 'A': { 'Mon Dec 31 2018 08:00:00 GMT+0800 (x)': 129.5, 'closeyest': 100 } })
+    });
+    const source = new AppsScriptPriceSource(TEST_CFG);
+    const prices = await source.getPrices(['A']);
+    expect(prices).toEqual({ 'A': { '2018-12-31': 129.5, 'closeyest': 100 } });
   });
 
   it('AppsScriptPriceSource throws E_AUTH on non-2xx', async () => {

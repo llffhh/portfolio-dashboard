@@ -80,6 +80,15 @@ Pure functions, no I/O.
 | `dividendsByYear` | `(Dividend[]) -> {year: total}` | **MET-8:** `Σ years == Σ amounts`. |
 | `portfolioValueOverTime` | `(Trade[], PriceMap, dates[]) -> {date,value}[]` | **MET-9:** dates ascending; `value(t)=Σ_ticker sharesHeld(t)×price(ticker,t)`, `sharesHeld(t)=Σ buys≤t − Σ sells≤t`. Missing price for held ticker at `t` ⇒ `E_NO_PRICE`. |
 
+### A.2b Rev 3.2 additions (approved 2026-07-10)
+| Fn | Signature | Definition / invariant |
+|---|---|---|
+| `yesterdayValue` | via `currentValue(holdings, priceMap, 'closeyest')` | **MET-10:** Prices tab column `closeyest` (`GOOGLEFINANCE(...,"closeyest")`, previous trading-day close) served under reserved PriceMap key `'closeyest'`. Tickers without it excluded + surfaced. UI shows Current Value, Yesterday Close Value, and ▲/▼ delta. |
+| `depositsByYear` | `(Deposit[]) -> {year: total}` | **MET-11:** `Σ years == Σ amounts` (same conservation as MET-8). UI: bar chart + cumulative overlay. |
+| `yearlyPnL` | `(valueByYear, investedByYear) -> {year: pnl}` | **MET-12:** `PnL(y) = V(y) − V(y−1) − invested(y)` (V(y₀−1)=0). Excludes dividends by construction. Years with no computable V omitted + surfaced. Year-end V from historical close columns (last trading day ≤ Dec 31) in the Prices tab — which also feeds MET-9's value-over-time chart. |
+
+*Known limitation (extends L4): delisted/renamed tickers sold in the past have no GOOGLEFINANCE history → early-year V slightly understated; surfaced in the review notice.*
+
 ### A.3 XIRR & CAGR assembly
 - `buildXirrCashflows(Deposit[], Dividend[], withdrawals, terminalValue, terminalDate) -> {date,amount}[]` — **CF-1:** deposits → `−amount`; dividends → `+amount`; withdrawals (CD轉出) → `+amount`; terminal → `+terminalValue` at `terminalDate`. (Account-level money-weighted return.)
 - **Simple CAGR inputs (CF-2):** `beginValue = investedCapital`, `endValue = currentValue + totalDividends`, `years = (terminalDate − earliest Deposit.date)/365.25`.

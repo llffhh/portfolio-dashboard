@@ -103,6 +103,26 @@ export function dividendsByYear(divs) {
   return result;
 }
 
+// MET-11: same conservation invariant as MET-8, over deposits (CD轉入)
+export function depositsByYear(deposits) {
+  return dividendsByYear(deposits);
+}
+
+// MET-12: PnL(y) = V(y) − V(y−1) − invested(y); V before first year = 0.
+// Excludes dividends by construction. Years without a computable V are omitted.
+export function yearlyPnL(valueByYear, investedByYear) {
+  const years = Object.keys(valueByYear).sort();
+  const result = {};
+  let prev = 0;
+  for (const y of years) {
+    const v = valueByYear[y];
+    if (v === null || v === undefined) continue;
+    result[y] = v - prev - (investedByYear[y] || 0);
+    prev = v;
+  }
+  return result;
+}
+
 export function portfolioValueOverTime(trades, priceMap, dates) {
   const result = [];
   const sortedDates = [...dates].sort((a, b) => new Date(a) - new Date(b));

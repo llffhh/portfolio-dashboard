@@ -1,10 +1,36 @@
-import { LocalJsonSource, MockPriceSource } from './data.js';
-import { AppsScriptSource, AppsScriptPriceSource } from './api.js';
-import { getConfig, saveConfig } from './settings.js';
+import { LocalJsonSource, MockPriceSource } from './data.js?v=32';
+import { AppsScriptSource, AppsScriptPriceSource } from './api.js?v=32';
+import { getConfig, saveConfig } from './settings.js?v=32';
 import {
   currentHoldings, costOfHoldings, investedCapital, currentValue,
-  roi, xirr, simpleCagr, dividendsByYear, portfolioValueOverTime, buildXirrCashflows
-} from './metrics.js';
+  roi, xirr, simpleCagr, dividendsByYear, depositsByYear, yearlyPnL,
+  portfolioValueOverTime, buildXirrCashflows
+} from './metrics.js?v=32';
+
+// Shares held per ticker as of a date (tolerant app-side variant of MET-9's
+// reconstruction — missing prices are skipped and surfaced, not thrown).
+function holdingsAt(trades, dateStr) {
+  const t = new Date(dateStr).getTime();
+  const pos = {};
+  for (const tr of trades) {
+    if (new Date(tr.date).getTime() > t || tr.shares == null) continue;
+    pos[tr.ticker] = (pos[tr.ticker] || 0) + (tr.type === 'buy' ? tr.shares : -tr.shares);
+  }
+  return pos;
+}
+
+function valueAt(trades, priceMap, dateStr, missing) {
+  const pos = holdingsAt(trades, dateStr);
+  let total = 0, priced = 0;
+  for (const [ticker, shares] of Object.entries(pos)) {
+    if (shares <= 0) continue;
+    const p = priceMap[ticker]?.[dateStr];
+    if (p == null) { missing?.add(ticker); continue; }
+    total += shares * p;
+    priced++;
+  }
+  return priced > 0 ? total : null;
+}
 
 // Config comes from gitignored config.js (dev) or localStorage (Pages) — see settings.js.
 // With config → live Apps Script; without → offline data/ preview if present, else setup form.
@@ -62,16 +88,29 @@ async function init() {
     // omit the dates filter so all available columns (today + any year-ends) return.
     const priceMap = await priceSource.getPrices(Object.keys(holdings));
 
+    // The sheet's "current price" is keyed by ITS timezone's today (Asia/Taipei),
+    // which can differ from the client's UTC date — use the latest date key served.
+    const servedDates = [...new Set(Object.values(priceMap).flatMap(m => Object.keys(m)))]
+      .filter(k => /^\d{4}-\d{2}-\d{2}$/.test(k)).sort();
+    const priceToday = servedDates[servedDates.length - 1] || today;
+
     // Filter review lots (null shares) and missing prices
     const noPriceTickers = new Set();
     let currentVal = 0;
-    
+    let yesterdayVal = 0;          // MET-10: previous trading-day close ('closeyest')
+    let hasYesterday = false;
+
     for (const [ticker, data] of Object.entries(holdings)) {
-      const price = priceMap[ticker]?.[today];
+      const price = priceMap[ticker]?.[priceToday];
       if (price === undefined || price === null) {
         noPriceTickers.add(ticker);
       } else {
         currentVal += data.shares * price;
+      }
+      const yPrice = priceMap[ticker]?.['closeyest'];
+      if (yPrice != null) {
+        yesterdayVal += data.shares * yPrice;
+        hasYesterday = true;
       }
     }
 
@@ -100,6 +139,18 @@ async function init() {
 
     document.getElementById('val-invested').innerText = invested.toLocaleString();
     document.getElementById('val-dividends').innerText = totalDivs.toLocaleString();
+
+    // MET-10 cards: current value, yesterday close value, delta
+    document.getElementById('val-current').innerText = Math.round(currentVal).toLocaleString();
+    if (hasYesterday) {
+      document.getElementById('val-yesterday').innerText = Math.round(yesterdayVal).toLocaleString();
+      const delta = currentVal - yesterdayVal;
+      const el = document.getElementById('val-delta');
+      el.innerText = `${delta >= 0 ? '▲' : '▼'} ${Math.abs(Math.round(delta)).toLocaleString()} (${yesterdayVal ? (delta / yesterdayVal * 100).toFixed(2) : '0.00'}%)`;
+      el.style.color = delta >= 0 ? '#dc2626' : '#16a34a';  // TW convention: red up, green down
+    } else {
+      document.getElementById('val-yesterday').innerText = 'N/A';
+    }
 
     let computedRoi = 0;
     try { computedRoi = roi(currentVal, totalDivs, cost); } catch(e) {}
@@ -133,28 +184,39 @@ async function init() {
       }
     });
 
+    // Year-end value series from the Prices tab's date columns (rev 3.2) —
+    // tolerant: tickers with no historical price at a date are skipped + surfaced.
+    const histMissing = new Set();
+    const yearEndDates = servedDates.filter(k => k !== priceToday);
+
+    const series = [];
+    const valueByYear = {};
+    for (const d of yearEndDates) {
+      const v = valueAt(trades, priceMap, d, histMissing);
+      if (v !== null) { series.push({ date: d, value: v }); valueByYear[d.substring(0, 4)] = v; }
+    }
+    if (currentVal > 0) {
+      series.push({ date: priceToday, value: currentVal });
+      valueByYear[priceToday.substring(0, 4)] = currentVal;
+    }
+
+    if (histMissing.size > 0) {
+      document.getElementById('review-notice').classList.add('visible');
+      document.getElementById('review-list').innerHTML +=
+        `<li>No historical price for some year-ends (those tickers excluded from past values): ${[...histMissing].join(', ')}</li>`;
+    }
+
     try {
-      // For portfolio value, we only chart dates where we have prices for all held tickers at that date
-      const safeDates = dates.filter(date => {
-        return !Array.from(allTickers).some(t => {
-          // simple check: if we held it, and price is null... we might skip.
-          // For simplicity in the app, we'll let portfolioValueOverTime throw or filter it.
-          return false; 
-        });
-      });
-      // Filter out trades with tickers that have missing prices to avoid E_NO_PRICE
-      const safeTrades = trades.filter(t => priceMap[t.ticker]);
-      const pvOverTime = portfolioValueOverTime(safeTrades, priceMap, dates);
-      
       new Chart(document.getElementById('valueChart'), {
         type: 'line',
         data: {
-          labels: pvOverTime.map(d => d.date),
+          labels: series.map(d => d.date),
           datasets: [{
             label: 'Portfolio Value',
-            data: pvOverTime.map(d => d.value),
+            data: series.map(d => d.value),
             borderColor: '#10b981',
-            tension: 0.1
+            tension: 0.1,
+            fill: false
           }]
         }
       });
@@ -162,10 +224,44 @@ async function init() {
       console.warn("Could not render value chart", e);
     }
 
+    // MET-11: invested capital per year + cumulative overlay
+    try {
+      const invByYear = depositsByYear(deposits);
+      const invYears = Object.keys(invByYear).sort();
+      let running = 0;
+      const cumulative = invYears.map(y => (running += invByYear[y]));
+      new Chart(document.getElementById('investedChart'), {
+        data: {
+          labels: invYears,
+          datasets: [
+            { type: 'bar', label: 'Invested that year', data: invYears.map(y => invByYear[y]), backgroundColor: '#6366f1' },
+            { type: 'line', label: 'Cumulative capital', data: cumulative, borderColor: '#f59e0b', tension: 0.1 }
+          ]
+        }
+      });
+
+      // MET-12: yearly P/L excluding dividends (current year = YTD, uses live value)
+      const pnl = yearlyPnL(valueByYear, invByYear);
+      const pnlYears = Object.keys(pnl).sort();
+      new Chart(document.getElementById('pnlChart'), {
+        type: 'bar',
+        data: {
+          labels: pnlYears.map(y => y === priceToday.substring(0, 4) ? `${y} YTD` : y),
+          datasets: [{
+            label: 'P/L (excl. dividends)',
+            data: pnlYears.map(y => pnl[y]),
+            backgroundColor: pnlYears.map(y => pnl[y] >= 0 ? '#dc2626' : '#16a34a')
+          }]
+        }
+      });
+    } catch (e) {
+      console.warn("Could not render yearly charts", e);
+    }
+
     // Table
     const tbody = document.querySelector('#holdingsTable tbody');
     for (const [ticker, data] of Object.entries(holdings)) {
-      const price = priceMap[ticker]?.[today];
+      const price = priceMap[ticker]?.[priceToday];
       const val = price ? (data.shares * price) : 0;
       const tDivs = divs.filter(d => d.name === ticker || d.code === ticker).reduce((s,d) => s + d.amount, 0);
       const yieldPct = data.cost > 0 ? (tDivs / data.cost) * 100 : 0;

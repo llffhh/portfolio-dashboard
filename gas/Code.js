@@ -110,7 +110,8 @@ function getPricesFromSheet(tickers, dates) {
     for (let j = 1; j < headers.length; j++) {
       let key = headers[j];
       if (String(key).toLowerCase() === 'code') continue;
-      if (key instanceof Date) {
+      // duck-typed Date check — `instanceof Date` is unreliable in the GAS V8 runtime
+      if (key && typeof key.getTime === 'function') {
         key = Utilities.formatDate(key, tz, 'yyyy-MM-dd');
       } else if (String(key).toLowerCase() === 'price') {
         key = today;

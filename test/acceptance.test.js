@@ -10,6 +10,8 @@ import {
   xirr,
   simpleCagr,
   dividendsByYear,
+  depositsByYear,
+  yearlyPnL,
   portfolioValueOverTime,
   buildXirrCashflows
 } from '../src/metrics.js';
@@ -115,6 +117,25 @@ describe('Acceptance Tests (design.md Section A)', () => {
       expect(simpleCagr(1000, 1210, 2)).toBeCloseTo(0.1, 4);
       expect(() => simpleCagr(0, 1000, 2)).toThrowError('E_CAGR_DOMAIN');
       expect(() => simpleCagr(1000, 1210, 0)).toThrowError('E_CAGR_DOMAIN');
+    });
+
+    it('MET-11: depositsByYear conservation (rev 3.2)', () => {
+      const deposits = [
+        { date: '2017-01-01', amount: 1000 },
+        { date: '2017-06-01', amount: 2000 },
+        { date: '2019-03-01', amount: 500 },
+      ];
+      const byYear = depositsByYear(deposits);
+      expect(byYear).toEqual({ '2017': 3000, '2019': 500 });
+      expect(Object.values(byYear).reduce((a, b) => a + b, 0)).toBe(3500);
+    });
+
+    it('MET-12: yearlyPnL = V(y) − V(y−1) − invested(y); missing V omitted (rev 3.2)', () => {
+      const valueByYear = { '2020': 1200, '2021': 2500, '2022': null, '2023': 2600 };
+      const investedByYear = { '2020': 1000, '2021': 1000 };
+      const pnl = yearlyPnL(valueByYear, investedByYear);
+      // 2020: 1200-0-1000=200; 2021: 2500-1200-1000=300; 2022 omitted; 2023: 2600-2500-0=100
+      expect(pnl).toEqual({ '2020': 200, '2021': 300, '2023': 100 });
     });
 
     it('MET-8: dividendsByYear conservation', () => {

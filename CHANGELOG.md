@@ -35,3 +35,10 @@ Built under the Universal SDLC (Standard tier). Source ledger: `股票 2023.xlsx
 - Live at https://llffhh.github.io/portfolio-dashboard/ (repo: llffhh/portfolio-dashboard, public).
 - Key-entry model: no secret in the repo; `src/settings.js` resolves config from gitignored `config.js` (dev) or browser localStorage via an in-page setup form (Pages). Verified on the live site: setup form → key saved → real data renders (ROI 123.73%, XIRR 19.35%).
 - `.gitignore` hardened: real data (`data/`, xlsx, csv, root json), `config.js`, and local tooling excluded; verified nothing sensitive in the initial commit; `config.js` returns 404 on the live site.
+
+### Rev 3.2 (2026-07-11) — yesterday value, yearly capital, yearly P/L
+- New cards: Current Value + Yesterday Close Value with ▲/▼ delta (GOOGLEFINANCE `closeyest` column, MET-10).
+- New charts: Invested Capital per Year with cumulative overlay (MET-11); Yearly P/L excluding dividends = V(y)−V(y−1)−invested(y) (MET-12).
+- Historical value chart now populated: year-end close columns (last trading day ≤ Dec 31, 2017–2025) added to the Prices tab; portfolio line runs 2017→today.
+- Fixes: client normalizes raw GAS date keys (V8 `instanceof Date` unreliable — duck-typed fix also in gas/Code.js for next redeploy); current-price lookups keyed to the sheet's timezone date, not client UTC; internal ES-module imports version-tagged to bust browser module cache.
+- 21 tests pass. Known caveat: early-year values slightly understated where sold/delisted tickers lack GOOGLEFINANCE history (surfaced in review notice).
