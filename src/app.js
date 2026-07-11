@@ -263,8 +263,9 @@ async function init() {
     for (const [ticker, data] of Object.entries(holdings)) {
       const price = priceMap[ticker]?.[priceToday];
       const val = price ? (data.shares * price) : 0;
-      const tDivs = divs.filter(d => d.name === ticker || d.code === ticker).reduce((s,d) => s + d.amount, 0);
-      const yieldPct = data.cost > 0 ? (tDivs / data.cost) * 100 : 0;
+      const plPct = data.cost > 0 && price ? ((val - data.cost) / data.cost) * 100 : 0;
+      const plColor = plPct >= 0 ? '#dc2626' : '#16a34a';
+      const plText = price ? `<span style="color: ${plColor}; font-weight: 600;">${plPct >= 0 ? '▲' : '▼'} ${Math.abs(plPct).toFixed(2)}%</span>` : 'N/A';
       
       tbody.innerHTML += `
         <tr>
@@ -272,7 +273,7 @@ async function init() {
           <td>${data.shares.toLocaleString()}</td>
           <td>${data.cost.toLocaleString()}</td>
           <td>${price ? val.toLocaleString() : 'N/A'}</td>
-          <td>${yieldPct.toFixed(2)}%</td>
+          <td>${plText}</td>
         </tr>
       `;
     }

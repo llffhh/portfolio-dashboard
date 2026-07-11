@@ -98,8 +98,8 @@ One test per clause / error-taxonomy entry / invariant in §A; label each with i
 - Vitest suite (17 tests) runs and passes successfully.
 
 
-### Iteration 3 — 2026-07-11 (Historical Price Automation & UI Grid Redesign)
-**Triggered by:** user request to automate missing historical stock prices, support OTC previous closes, and redesign charts into a 4x1 grid
+### Iteration 3 — 2026-07-11 (Historical Price Automation, UI Grid & Holdings Table Redesign)
+**Triggered by:** user request to automate missing historical stock prices, support OTC previous closes, redesign charts into a 4x1 grid, and change Holdings table Yield (%) to Profit/Loss (%)
 
 **Actions taken:**
 - Defined `KNOW_CODES` mapping in `extract.py` to resolve missing TWSE codes for known stock tickers (e.g. `台達電` -> `2308`, `瑞昱` -> `2379`, etc.).
@@ -107,7 +107,8 @@ One test per clause / error-taxonomy entry / invariant in §A; label each with i
 - Added custom function `GET_TAIWAN_STOCK_PRICE` to `gas/Code.js` supporting Yahoo Finance JSON API lookups for TWSE and TPEx tickers (like `8299`).
 - Added support for the `"closeyest"` parameter in the custom function to fetch the previous day's close price, and updated `extract.py` to output the `closeyest` column automatically.
 - Programmed fallback Excel formulas (`=IFERROR(GOOGLEFINANCE(...), GET_TAIWAN_STOCK_PRICE(...))`) to automatically fetch both current and historical prices upon Google Sheets import.
-- Redesigned the chart layout in `index.html` into a responsive 4x1 grid (4 columns side-by-side on desktop, 2x2 on tablet, and stacked on mobile).
+- Redesigned the chart layout in `index.html` to display as a vertical 4x1 grid stack.
+- Replaced the cumulative `Yield (%)` column in the Current Holdings table with a `Profit/Loss (%)` column calculated as `(Live Value - Cost) / Cost * 100`. Color-coded the text (TW Red up, Green down) and added gain/loss indicators (▲ and ▼).
 - Ran `extract.py` successfully and verified all 21 Vitest tests pass.
 
 **Deviations from plan:**
@@ -116,6 +117,7 @@ One test per clause / error-taxonomy entry / invariant in §A; label each with i
 **Flagged for Auditor (Claude):**
 - Tickers that were sold in the past and are not currently held are excluded from the `Prices` tab. This is a known limitation from rev 3.2.
 - The `GET_TAIWAN_STOCK_PRICE` custom function must be copied into the user's online Google Apps Script project for the fallback formulas to evaluate.
+
 
 
 
