@@ -1,5 +1,5 @@
 import { LocalJsonSource, MockPriceSource } from './data.js?v=32';
-import { AppsScriptSource, AppsScriptPriceSource } from './api.js?v=32';
+import { AppsScriptSource, AppsScriptPriceSource, normalizeDateKey } from './api.js?v=32';
 import { getConfig, saveConfig } from './settings.js?v=32';
 import {
   currentHoldings, costOfHoldings, investedCapital, currentValue,
