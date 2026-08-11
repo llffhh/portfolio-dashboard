@@ -1,3 +1,13 @@
+// Mirrors AppsScriptSource: trim stray whitespace in ticker/name (A.0).
+function normalizeRecords(rows) {
+  if (!Array.isArray(rows)) return rows;
+  for (const r of rows) {
+    if (r && typeof r.ticker === 'string') r.ticker = r.ticker.trim();
+    if (r && typeof r.name === 'string') r.name = r.name.trim();
+  }
+  return rows;
+}
+
 export class LocalJsonSource {
   constructor(basePath) {
     this.basePath = basePath;
@@ -19,7 +29,7 @@ export class LocalJsonSource {
         if (!validator(record)) throw new Error('E_DATA_PARSE');
       }
     }
-    return data;
+    return normalizeRecords(data);
   }
 
   async loadHeldLots() {

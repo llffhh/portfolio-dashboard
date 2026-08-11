@@ -42,3 +42,12 @@ Built under the Universal SDLC (Standard tier). Source ledger: `股票 2023.xlsx
 - Historical value chart now populated: year-end close columns (last trading day ≤ Dec 31, 2017–2025) added to the Prices tab; portfolio line runs 2017→today.
 - Fixes: client normalizes raw GAS date keys (V8 `instanceof Date` unreliable — duck-typed fix also in gas/Code.js for next redeploy); current-price lookups keyed to the sheet's timezone date, not client UTC; internal ES-module imports version-tagged to bust browser module cache.
 - 21 tests pass. Known caveat: early-year values slightly understated where sold/delisted tickers lack GOOGLEFINANCE history (surfaced in review notice).
+
+### Rev 3.3 (2026-08-11) — complete price coverage + trustworthy history start
+- **Fixed root cause of wrong early years:** the Prices tab only held *currently-owned* tickers, but the history chart reconstructs past positions from Trades — so every stock already sold (台積電, 鴻海, 友訊, 撼訊, 尼克森, 康那香, 力旺, 泰碩, 東元, 宏碁, 波若威, 車王電, 統懋, 華冠, 錦明, 國產, 花王, 金寶…) had no price and silently vanished from past values. `extract.py` now emits a price row for **every ticker ever traded**; 33 rows appended to the live sheet + 晶電's code filled.
+  Effect: 2017 year-end value corrected 28,400 → **376,900**; 2019 115,560 → **994,883**.
+- **Fixed ticker whitespace bug:** the ledger contains `'台積電 '` / `'穩懋 '` with trailing spaces, which split one holding into two and broke code lookup. Normalized in `extract.py` and in both data sources (`normalizeRecords`, A.0).
+- **History now starts only when fully priced (MET-9a):** year-ends where any held stock lacks a price are dropped from the front of the series instead of being charted as misleading lows; later partly-priced years are charted but named in the review notice.
+- App requests **all** price rows (empty ticker list) rather than only current holdings, so sold tickers are priced.
+- 23 tests pass (added `normalizeRecords` + end-to-end trim coverage).
+- Remaining unpriced (<1% of value, flagged in-app): 太極 and 聯亞藥 (no TWSE code known — codes not in the dividend records), 晶電 (delisted, merged into 富采), 波若威 2025 only.

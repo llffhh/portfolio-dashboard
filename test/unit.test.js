@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
-import { AppsScriptSource, AppsScriptPriceSource, normalizeDateKey } from '../src/api.js';
+import { AppsScriptSource, AppsScriptPriceSource, normalizeDateKey, normalizeRecords } from '../src/api.js';
 
 const TEST_CFG = { WEBAPP_URL: 'https://script.test/exec', API_KEY: 'testkey' };
 
@@ -47,6 +47,23 @@ describe('Unit Tests: Apps Script Integration', () => {
     const prices = await source.getPrices(['A'], ['2023-12-31']);
     expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('resource=prices&tickers=A&dates=2023-12-31'));
     expect(prices).toEqual({ 'A': { '2023-12-31': 100 } });
+  });
+
+  it('normalizeRecords trims stray whitespace in ticker/name (A.0 normalization)', () => {
+    const rows = [{ ticker: '台積電 ', shares: 1 }, { ticker: '穩懋', shares: 2 }, { name: ' 仁寶 ' }];
+    const out = normalizeRecords(rows);
+    expect(out[0].ticker).toBe('台積電');
+    expect(out[1].ticker).toBe('穩懋');
+    expect(out[2].name).toBe('仁寶');
+  });
+
+  it('AppsScriptSource trims tickers end-to-end', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true, json: async () => ([{ ticker: '台積電 ', shares: 1000 }])
+    });
+    const source = new AppsScriptSource(TEST_CFG);
+    const lots = await source.loadHeldLots();
+    expect(lots[0].ticker).toBe('台積電');
   });
 
   it('normalizeDateKey converts raw GAS date strings to yyyy-MM-dd', () => {

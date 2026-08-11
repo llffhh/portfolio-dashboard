@@ -13,7 +13,7 @@ export class AppsScriptSource {
       if (data.error === 'upstream') throw new Error('E_PRICE_FETCH');
       throw new Error('E_DATA_PARSE');
     }
-    return data;
+    return normalizeRecords(data);
   }
 
   async loadHeldLots() { return this._fetch('heldlots'); }
@@ -29,6 +29,17 @@ export class AppsScriptSource {
 // from the string itself (no client-timezone math).
 const MONTHS = { Jan: '01', Feb: '02', Mar: '03', Apr: '04', May: '05', Jun: '06',
                  Jul: '07', Aug: '08', Sep: '09', Oct: '10', Nov: '11', Dec: '12' };
+// The ledger contains stray trailing spaces ('台積電 ' vs '台積電'), which
+// otherwise split one holding into two and break price lookups (A.0 normalization).
+export function normalizeRecords(rows) {
+  if (!Array.isArray(rows)) return rows;
+  for (const r of rows) {
+    if (r && typeof r.ticker === 'string') r.ticker = r.ticker.trim();
+    if (r && typeof r.name === 'string') r.name = r.name.trim();
+  }
+  return rows;
+}
+
 export function normalizeDateKey(k) {
   if (/^\d{4}-\d{2}-\d{2}$/.test(k) || k === 'closeyest') return k;
   const m = /^\w{3} (\w{3}) (\d{2}) (\d{4})/.exec(k);

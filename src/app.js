@@ -19,17 +19,21 @@ function holdingsAt(trades, dateStr) {
   return pos;
 }
 
+// Value of the reconstructed position at a date, plus which held tickers had
+// no price there. `complete` = every held ticker priced, i.e. the figure is
+// trustworthy rather than silently understated.
 function valueAt(trades, priceMap, dateStr, missing) {
   const pos = holdingsAt(trades, dateStr);
   let total = 0, priced = 0;
+  const gaps = [];
   for (const [ticker, shares] of Object.entries(pos)) {
     if (shares <= 0) continue;
     const p = priceMap[ticker]?.[dateStr];
-    if (p == null) { missing?.add(ticker); continue; }
+    if (p == null) { missing?.add(ticker); gaps.push(ticker); continue; }
     total += shares * p;
     priced++;
   }
-  return priced > 0 ? total : null;
+  return { value: priced > 0 ? total : null, complete: priced > 0 && gaps.length === 0, gaps };
 }
 
 // Config comes from gitignored config.js (dev) or localStorage (Pages) — see settings.js.
@@ -93,7 +97,10 @@ async function init() {
 
     // Request prices only for currently-held tickers (≤50 cap, design A.6);
     // omit the dates filter so all available columns (today + any year-ends) return.
-    const priceMap = await priceSource.getPrices(Object.keys(holdings));
+    // Fetch EVERY price row (empty ticker list = all): the historical chart
+    // reconstructs past positions from Trades, so it needs prices for tickers
+    // already sold, not just current holdings.
+    const priceMap = await priceSource.getPrices([]);
 
     // The sheet's "current price" is keyed by ITS timezone's today (Asia/Taipei),
     // which can differ from the client's UTC date — use the latest date key served.
@@ -193,24 +200,44 @@ async function init() {
 
     // Year-end value series from the Prices tab's date columns (rev 3.2) —
     // tolerant: tickers with no historical price at a date are skipped + surfaced.
+    // The history only starts once EVERY stock held at that date has a price —
+    // earlier year-ends would silently understate the portfolio, so they are
+    // dropped rather than charted as misleading lows.
     const histMissing = new Set();
     const yearEndDates = servedDates.filter(k => k !== priceToday);
 
+    const evaluated = yearEndDates.map(d => ({ date: d, ...valueAt(trades, priceMap, d, null) }));
+    const startIdx = evaluated.findIndex(e => e.complete);
+    const skipped = startIdx === -1 ? evaluated : evaluated.slice(0, startIdx);
+    const usable = startIdx === -1 ? [] : evaluated.slice(startIdx);
+
     const series = [];
     const valueByYear = {};
-    for (const d of yearEndDates) {
-      const v = valueAt(trades, priceMap, d, histMissing);
-      if (v !== null) { series.push({ date: d, value: v }); valueByYear[d.substring(0, 4)] = v; }
+    const partialYears = [];
+    for (const e of usable) {
+      if (e.value === null) continue;
+      e.gaps.forEach(t => histMissing.add(t));
+      if (!e.complete) partialYears.push(e.date.substring(0, 4));
+      series.push({ date: e.date, value: e.value });
+      valueByYear[e.date.substring(0, 4)] = e.value;
     }
     if (currentVal > 0) {
       series.push({ date: priceToday, value: currentVal });
       valueByYear[priceToday.substring(0, 4)] = currentVal;
     }
 
-    if (histMissing.size > 0) {
+    const notice = (msg) => {
       document.getElementById('review-notice').classList.add('visible');
-      document.getElementById('review-list').innerHTML +=
-        `<li>No historical price for some year-ends (those tickers excluded from past values): ${[...histMissing].join(', ')}</li>`;
+      document.getElementById('review-list').innerHTML += `<li>${msg}</li>`;
+    };
+    if (skipped.length > 0) {
+      notice(`History starts ${series.length ? series[0].date.substring(0, 4) : '—'}: earlier year-ends `
+        + `(${skipped.map(e => e.date.substring(0, 4)).join(', ')}) are hidden because some stocks held then have no price`
+        + ` (${[...new Set(skipped.flatMap(e => e.gaps))].join(', ')}).`);
+    }
+    if (partialYears.length > 0) {
+      notice(`Partly-priced year-ends (values slightly understated): ${partialYears.join(', ')}`
+        + ` — missing ${[...histMissing].join(', ')}.`);
     }
 
     const yearlySeries = series;

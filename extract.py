@@ -63,6 +63,8 @@ def extract(df):
     held, trades, deposits, divs, name2code = [], [], [], [], {}
     for _, r in df.iterrows():
         ticker, action = r["股票"], r["項目"]
+        if pd.notna(ticker):
+            ticker = str(ticker).strip()   # ledger has stray trailing spaces
         d = r["date"].strftime("%Y-%m-%d")
         is_div = ticker == DIV
 
@@ -75,15 +77,15 @@ def extract(df):
         if action == "CD轉入" and pd.notna(r["存入"]):
             deposits.append({"date": d, "amount": float(r["存入"])})
         if action == "轉帳支取" and pd.notna(ticker) and not is_div and pd.notna(r["支出"]):
-            trades.append({"date": d, "type": "buy", "ticker": str(ticker),
+            trades.append({"date": d, "type": "buy", "ticker": ticker,
                            "shares": num(r["股數"]), "amount": float(r["支出"])})
         if action == "轉帳存入" and pd.notna(ticker) and not is_div:
             amt = num(r["存入"])                       # corrupt rows (e.g. 2023-12-12 威剛) have blank 存入
             if amt is not None:
-                trades.append({"date": d, "type": "sell", "ticker": str(ticker),
+                trades.append({"date": d, "type": "sell", "ticker": ticker,
                                "shares": num(r["股數"]), "amount": amt})
         if str(r["尚未交易"]).upper().startswith("Y") and pd.notna(ticker) and not is_div:
-            held.append({"date": d, "ticker": str(ticker), "shares": num(r["股數"]),
+            held.append({"date": d, "ticker": ticker, "shares": num(r["股數"]),
                          "buyPrice": num(r["股價"]), "cost": float(num(r["目前投資金額"]) or 0)})
     # Merge known codes
     for name, code in KNOW_CODES.items():
@@ -127,13 +129,19 @@ def write_normalized(held, trades, deposits, divs, codes):
     years = sorted(list(set(int(d[:4]) for d in all_dates if len(d) >= 4 and d[:4].isdigit())))
     from datetime import date
     current_year = date.today().year
-    years = [y for y in years if 2010 <= y <= current_year]
+    # only COMPLETED years get a year-end column (a future 12-31 has no price)
+    years = [y for y in years if 2010 <= y < current_year]
     year_cols = [f"{y}-12-31" for y in years]
 
     wp = wb.create_sheet("Prices")
     wp.append(["ticker", "code", "price", "closeyest"] + year_cols)
 
-    for r_idx, tk in enumerate(sorted(holdings(held)), start=2):
+    # Every ticker EVER traded needs a price row, not just current holdings:
+    # the historical value chart reconstructs past positions from Trades, so a
+    # sold ticker with no price row silently understates the years it was held.
+    all_tickers = sorted(set(holdings(held)) | {t["ticker"] for t in trades})
+
+    for r_idx, tk in enumerate(all_tickers, start=2):
         code = codes.get(tk)
         row_data = [tk, code or ""]
         if code:
