@@ -43,6 +43,13 @@ Built under the Universal SDLC (Standard tier). Source ledger: `股票 2023.xlsx
 - Fixes: client normalizes raw GAS date keys (V8 `instanceof Date` unreliable — duck-typed fix also in gas/Code.js for next redeploy); current-price lookups keyed to the sheet's timezone date, not client UTC; internal ES-module imports version-tagged to bust browser module cache.
 - 21 tests pass. Known caveat: early-year values slightly understated where sold/delisted tickers lack GOOGLEFINANCE history (surfaced in review notice).
 
+### Rev 3.4 (2026-08-11) — re-normalized ledger, Cost of Holdings card, CD轉出 withdrawals
+- Re-ran `extract.py` on the updated `股票 2023.xlsx`: 191 held lots (46 tickers), 369 trades, 79 deposits, 190 dividends. **Both prior data-quality gaps closed by the user** — 0 null-share lots (was 1) and 0 held tickers missing a TWSE code.
+- **New card: Cost of Holdings** (Σ HeldLot.cost = Σ `目前投資金額` = NT$2,976,826), labeled as the ROI denominator so it reads distinctly from Invested Capital. Chart and its title deliberately left unchanged.
+- **`extract.py` now handles `CD轉出`** (cash leaving the account, 台新銀行轉國泰世華) as a negative deposit — previously ignored entirely, overstating invested capital by NT$238,800. A `CD轉出` carrying `股數` is money spent buying stock, mis-tagged in the ledger (2023-06-05 星宇航空, 137 shares) — an investment, not a withdrawal — and is excluded. Deposits: 76 rows / NT$2,401,730 → **79 rows / NT$2,162,930**, reconciling exactly with the live sheet's Deposits tab (no re-import needed).
+- Live cards after the change: Current Value 7,964,823 · Invested 2,162,930 · Cost of Holdings 2,976,826 · Dividends 589,945 · ROI 187.38% · XIRR 25.89% · Simple CAGR 15.39%.
+- Known open: 3 金像電 2020 trades still have blank `股數` (2020-04-01 / 04-10 / 06-17), so the historical chart holds that position flat through 2020–2021; the 2023-06-05 星宇航空 row has `尚未交易 = Y` and 137 shares but a blank `股票`, so it never becomes a HeldLot. Some `CD轉入` rows tagged 國泰世華銀行轉入 are transfers back from the second broker rather than new outside capital — deferred by decision, still counted as capital.
+
 ### Rev 3.3 (2026-08-11) — complete price coverage + trustworthy history start
 - **Fixed root cause of wrong early years:** the Prices tab only held *currently-owned* tickers, but the history chart reconstructs past positions from Trades — so every stock already sold (台積電, 鴻海, 友訊, 撼訊, 尼克森, 康那香, 力旺, 泰碩, 東元, 宏碁, 波若威, 車王電, 統懋, 華冠, 錦明, 國產, 花王, 金寶…) had no price and silently vanished from past values. `extract.py` now emits a price row for **every ticker ever traded**; 33 rows appended to the live sheet + 晶電's code filled.
   Effect: 2017 year-end value corrected 28,400 → **376,900**; 2019 115,560 → **994,883**.

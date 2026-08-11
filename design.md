@@ -44,8 +44,8 @@ Trade = {                   // every buy/sell, for historical holdings reconstru
   shares: number | null     amount: number   // >0, NT$ (支出 for buy, 存入 for sell)
 }
 
-Deposit = {                 // 項目="CD轉入" — invested capital injected into the account
-  date: string   amount: number   // >0 (存入)
+Deposit = {                 // 項目="CD轉入" (in) / "CD轉出" (out) — net capital moved into the account
+  date: string   amount: number   // >0 = 存入 (CD轉入);  <0 = −支出 (CD轉出 withdrawal)
 }
 
 Dividend = {                // 股票="股息"
@@ -60,7 +60,7 @@ PriceMap = { [ticker: string]: { [date: string]: number } }   // NT$ per share (
 - **Classification rules (authoritative):**
   - **HeldLot** ⇔ `尚未交易` starts with `"Y"`. `shares=股數`, `buyPrice=股價`, `cost=目前投資金額`.
   - **Dividend** ⇔ `股票 == "股息"`. Code+name parsed from `明細` (`現金股息2324仁寶`→`2324`,`仁寶`); `amount=存入`.
-  - **Deposit** ⇔ `項目 == "CD轉入"`; `amount=存入`.
+  - **Deposit** ⇔ `項目 == "CD轉入"`; `amount=存入` (>0). Also ⇔ `項目 == "CD轉出"` & `股數` blank; `amount=−支出` (<0, cash withdrawn from the account). A `CD轉出` **carrying `股數`** is money spent buying stock, mis-tagged in the ledger (2023-06-05 星宇航空) — it is an investment, not a withdrawal, and is excluded from Deposits.
   - **Trade(buy)** ⇔ `項目=="轉帳支取"` & `股票` set & `!= "股息"`; `amount=支出`. **Trade(sell)** ⇔ `項目=="轉帳存入"` & `股票` set & `!= "股息"`; `amount=存入`.
   - All other rows (interest, tax, 減資退款, 退綜所稅, cash withdrawals) excluded.
 - **Invariants:** DX-1 every record conforms to A.0; DX-2 `Σ Dividend.amount == Σ 存入 where 股票=股息`; DX-3 no `Trade`/`HeldLot` has `ticker=="股息"`; DX-4 `Σ HeldLot.cost == Σ 目前投資金額 over Y rows`.
@@ -72,7 +72,7 @@ Pure functions, no I/O.
 |---|---|---|
 | `currentHoldings` | `(HeldLot[]) -> {ticker: {shares, cost}}` | **MET-1:** per ticker, `shares=Σ lot.shares`, `cost=Σ lot.cost`. Lots with `shares==null` excluded from `shares` and surfaced for review. Result shares ≥ 0 by construction (sold lots aren't `Y`). |
 | `costOfHoldings` | `(HeldLot[]) -> number` | **MET-2:** `Σ HeldLot.cost` (= 目前投資金額). **This is the ROI denominator.** |
-| `investedCapital` | `(Deposit[]) -> number` | **MET-3:** `Σ Deposit.amount` (= CD轉入 total). |
+| `investedCapital` | `(Deposit[]) -> number` | **MET-3:** `Σ Deposit.amount` (= CD轉入 total net of CD轉出 withdrawals). |
 | `currentValue` | `({ticker:{shares}}, PriceMap, asOf) -> number` | **MET-4:** `Σ shares × price(ticker, asOf)`. Held ticker with no price ⇒ `E_NO_PRICE`. |
 | `roi` | `(value, dividends, cost) -> number` | **MET-5:** `(value + dividends − cost) / cost`, `cost=costOfHoldings`. `cost==0` ⇒ `E_DIV_ZERO_COST`. |
 | `xirr` | `(cashflows:{date,amount}[], guess?=0.1) -> number` | **MET-6:** rate `r`, `|NPV(r)|<1e-6`, Newton-Raphson ≤100 iters. Needs ≥1 neg & ≥1 pos ⇒ else `E_XIRR_BAD_INPUT`; non-convergence ⇒ `E_XIRR_NO_CONVERGE`. |

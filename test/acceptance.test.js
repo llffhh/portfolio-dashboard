@@ -71,6 +71,24 @@ describe('Acceptance Tests (design.md Section A)', () => {
       expect(investedCapital(deposits)).toBe(1500);
     });
 
+    it('MET-3: investedCapital nets CD轉出 withdrawals (negative deposits)', () => {
+      const deposits = [
+        { date: '2020', amount: 1000 },
+        { date: '2021', amount: 500 },
+        { date: '2021', amount: -300 },   // CD轉出 — cash moved out of the account
+      ];
+      expect(investedCapital(deposits)).toBe(1200);
+    });
+
+    it('CF-1: a CD轉出 withdrawal becomes a POSITIVE xirr cashflow', () => {
+      const flows = buildXirrCashflows(
+        [{ date: '2020-01-01', amount: 1000 }, { date: '2021-01-01', amount: -300 }],
+        [], [], undefined, undefined
+      );
+      expect(flows.find(f => f.date === '2020-01-01').amount).toBe(-1000);
+      expect(flows.find(f => f.date === '2021-01-01').amount).toBe(300);
+    });
+
     it('MET-4: currentValue = Σ shares×price; held ticker w/o price ⇒ E_NO_PRICE', () => {
       const holdings = {
         'A': { shares: 100, cost: 1000 },

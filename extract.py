@@ -9,6 +9,7 @@ Classification (authoritative, design.md §A.1) — projections are independent,
 (a 尚未交易=Y buy row is BOTH a Trade[buy] and a HeldLot):
   Dividend ⇔ 股票 == "股息"                                  (code+name from 明細)
   Deposit  ⇔ 項目 == "CD轉入"                                 (amount = 存入)
+           ⇔ 項目 == "CD轉出" & 股數 blank                     (amount = −支出; cash withdrawn)
   Trade buy  ⇔ 項目=="轉帳支取" & 股票 set & != "股息"          (amount = 支出)
   Trade sell ⇔ 項目=="轉帳存入" & 股票 set & != "股息"          (amount = 存入)
   HeldLot  ⇔ 尚未交易 starts "Y" & 股票 != "股息"  (shares=股數, buyPrice=股價, cost=目前投資金額)
@@ -76,6 +77,11 @@ def extract(df):
                          "amount": float(r["存入"]), "detail": str(r["明細"])})
         if action == "CD轉入" and pd.notna(r["存入"]):
             deposits.append({"date": d, "amount": float(r["存入"])})
+        # CD轉出 = cash leaving the account (台新銀行轉國泰世華) → negative deposit.
+        # Exception: a 轉出 carrying 股數 is an INVESTMENT mis-tagged as CD轉出
+        # (2023-06-05 星宇航空, 137 shares) — money spent on stock, not withdrawn.
+        if action == "CD轉出" and pd.notna(r["支出"]) and pd.isna(r["股數"]):
+            deposits.append({"date": d, "amount": -float(r["支出"])})
         if action == "轉帳支取" and pd.notna(ticker) and not is_div and pd.notna(r["支出"]):
             trades.append({"date": d, "type": "buy", "ticker": ticker,
                            "shares": num(r["股數"]), "amount": float(r["支出"])})
@@ -195,5 +201,9 @@ if __name__ == "__main__":
     print(f"dividends total: NT$ {sum(d['amount'] for d in divs):,.0f}  (DX-2 ✓, DX-3 ✓)")
     nullsh = [h["ticker"] for h in held if h["shares"] is None]
     print(f"null-share lots (review): {len(nullsh)} {sorted(set(nullsh))}")
+    # trades without 股數 break the historical reconstruction (app.js skips them,
+    # freezing the position) — surface them the same way as null-share lots
+    nulltr = [t["ticker"] for t in trades if t["shares"] is None]
+    print(f"null-share trades (review): {len(nulltr)} {sorted(set(nulltr))}")
     print(f"held tickers without TWSE code: {sorted(t for t in pos if t not in codes)}")
     print("Wrote data/*.json + portfolio_normalized.xlsx (HeldLots/Trades/Deposits/Dividends/Prices)")

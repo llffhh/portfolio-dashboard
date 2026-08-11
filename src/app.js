@@ -152,6 +152,7 @@ async function init() {
     }
 
     document.getElementById('val-invested').innerText = invested.toLocaleString();
+    document.getElementById('val-cost').innerText = cost.toLocaleString();
     document.getElementById('val-dividends').innerText = totalDivs.toLocaleString();
 
     // MET-10 cards: current value, yesterday close value, delta
