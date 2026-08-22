@@ -207,6 +207,14 @@ function GET_TAIWAN_STOCK_PRICE(code, dateStr) {
 }
 
 /**
+ * Length of the DailyHistory rolling window, in days. Both the backfill's
+ * default start and the prune in recordDailySnapshot derive from this, so the
+ * two cannot drift apart (a backfill wider than the window is deleted by the
+ * next snapshot run; a narrower one never fills the chart).
+ */
+var HISTORY_WINDOW_DAYS = 365;
+
+/**
  * Returns the session the market data currently reflects, taken from the feed
  * itself rather than from the clock — GOOGLEFINANCE returns a bare number with
  * no indication of which session it belongs to, so the run date is NOT a safe
@@ -334,7 +342,7 @@ function recordDailySnapshot() {
   if (historySheet.getLastRow() > 2) {
     historySheet.getRange(2, 1, historySheet.getLastRow() - 1, historySheet.getLastColumn()).sort({column: 1, ascending: true});
   }
-  const maxRows = 366; // header + 365 days
+  const maxRows = HISTORY_WINDOW_DAYS + 1; // header + window
   const lastRow = historySheet.getLastRow();
   if (lastRow > maxRows) {
     const rowsToDelete = lastRow - maxRows;
@@ -343,18 +351,39 @@ function recordDailySnapshot() {
 }
 
 /**
- * Reconstructs daily snapshots starting from monthsAgo months ago and writes to DailyHistory sheet.
- * @param {number} monthsAgo Number of months to backfill (default 3)
+ * Reconstructs daily snapshots and writes them to the DailyHistory sheet.
+ *
+ * Default start is a trailing HISTORY_WINDOW_DAYS (365) — the same window the
+ * prune maintains, so one run fills the chart exactly. Prices are fetched as
+ * one date-range request per ticker, so a longer window costs no extra Yahoo
+ * calls than a short one.
+ *
+ * @param {number|string} [start] Omit for the trailing 365-day window; a number
+ *        = that many months back (legacy); a 'YYYY-MM-DD' string = explicit
+ *        start (note: anything older than the window is trimmed by the next
+ *        recordDailySnapshot run unless HISTORY_WINDOW_DAYS is raised too).
  */
-function backfillDailySnapshots(monthsAgo) {
-  monthsAgo = monthsAgo || 3;
+function backfillDailySnapshots(start) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  
+
   // 1. Determine date range
   const tz = ss.getSpreadsheetTimeZone() || Session.getScriptTimeZone() || 'Asia/Taipei';
   const now = new Date();
-  const startDate = new Date();
-  startDate.setMonth(now.getMonth() - monthsAgo);
+  let startDate;
+  if (typeof start === 'number' && start > 0) {
+    startDate = new Date();
+    startDate.setMonth(now.getMonth() - start);          // legacy: months back
+  } else if (typeof start === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(start)) {
+    const p = start.split('-');
+    startDate = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
+  } else {
+    // Default: trailing HISTORY_WINDOW_DAYS, matching the prune exactly, so a
+    // fresh backfill fills the window and nothing it writes is trimmed.
+    startDate = new Date(now.getTime());
+    startDate.setDate(startDate.getDate() - (HISTORY_WINDOW_DAYS - 1));
+  }
+  Logger.log('Backfilling from ' + Utilities.formatDate(startDate, tz, 'yyyy-MM-dd')
+             + ' to ' + Utilities.formatDate(now, tz, 'yyyy-MM-dd'));
   
   const dates = [];
   let curr = new Date(startDate);
