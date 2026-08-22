@@ -207,6 +207,42 @@ function GET_TAIWAN_STOCK_PRICE(code, dateStr) {
 }
 
 /**
+ * Returns the session the market data currently reflects, taken from the feed
+ * itself rather than from the clock — GOOGLEFINANCE returns a bare number with
+ * no indication of which session it belongs to, so the run date is NOT a safe
+ * label (a run before the close stamps yesterday's close under today's date).
+ *
+ * @param {string} tz Timezone to format the date in (the sheet's).
+ * @return {{date: string, isClosed: boolean}|null} null if the probe fails.
+ */
+function getLastTradeSession_(tz) {
+  // 2330 台積電 — most liquid TWSE name, safest probe for the session date.
+  var url = "https://query1.finance.yahoo.com/v8/finance/chart/2330.TW";
+  try {
+    var response = UrlFetchApp.fetch(url, {
+      muteHttpExceptions: true,
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
+    });
+    if (response.getResponseCode() !== 200) return null;
+    var meta = JSON.parse(response.getContentText()).chart.result[0].meta;
+    if (!meta || !meta.regularMarketTime) return null;
+    var ts = new Date(meta.regularMarketTime * 1000);
+    // TWSE closes 13:30; at the close regularMarketTime reads ~13:30:0x. An
+    // earlier time-of-day therefore means the session is still in progress and
+    // this is an intraday quote, not a close. (Yahoo's chart endpoint does NOT
+    // return marketState — that field is on the quote endpoint — so the
+    // timestamp is the only signal available here.)
+    var hhmm = Utilities.formatDate(ts, 'Asia/Taipei', 'HHmm');
+    return {
+      date: Utilities.formatDate(ts, tz, 'yyyy-MM-dd'),
+      isClosed: Number(hhmm) >= 1330
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
  * Calculates current portfolio value and appends it to the DailyHistory sheet.
  * Cleans up rows older than 365 days to maintain a rolling 1-year window.
  */
@@ -260,25 +296,38 @@ function recordDailySnapshot() {
   }
   
   const tz = ss.getSpreadsheetTimeZone() || Session.getScriptTimeZone() || 'Asia/Taipei';
-  const today = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
-  
+
+  // Stamp the row with the session the PRICES belong to, not the run date.
+  const session = getLastTradeSession_(tz);
+  if (session && !session.isClosed) {
+    // Mid-session: the price column is an intraday quote, not a close. Writing
+    // it would put a half-formed value on today's row. Skip; the after-close
+    // run records it properly.
+    return;
+  }
+  const stampDate = (session && session.date)
+    ? session.date
+    : Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');  // probe failed — fall back to run date
+
   const historyData = historySheet.getDataRange().getValues();
   let foundRow = -1;
   for (let i = 1; i < historyData.length; i++) {
     let dateVal = historyData[i][0];
-    if (dateVal instanceof Date) {
+    // duck-typed: V8 `instanceof Date` is unreliable across GAS contexts
+    if (dateVal && typeof dateVal.getTime === 'function') {
       dateVal = Utilities.formatDate(dateVal, tz, 'yyyy-MM-dd');
     }
-    if (dateVal === today) {
+    if (dateVal === stampDate) {
       foundRow = i + 1;
       break;
     }
   }
-  
+
+  // Upsert, so re-running the same day rewrites the row instead of duplicating it.
   if (foundRow !== -1) {
     historySheet.getRange(foundRow, 2).setValue(totalValue);
   } else {
-    historySheet.appendRow([today, totalValue]);
+    historySheet.appendRow([stampDate, totalValue]);
   }
   
   // 3. Keep rolling 365 days (delete older rows)
@@ -466,4 +515,31 @@ function backfillDailySnapshots(monthsAgo) {
   }
   
   Logger.log("Backfilled " + dailyValues.length + " daily snapshots!");
+}
+
+/**
+ * Installs the daily snapshot trigger at 18:00–19:00 (Apps Script fires at an
+ * arbitrary minute inside the hour). Run this ONCE from the editor.
+ *
+ * 18:00 is chosen for margin, not precision: TWSE closes 13:30, quotes are ~20
+ * min delayed, and GOOGLEFINANCE recalculates on its own schedule after that.
+ *
+ * NOTE: the hour is interpreted in the APPS SCRIPT PROJECT's timezone, not the
+ * spreadsheet's. Confirm Project Settings → Time zone is (GMT+08:00) Taipei,
+ * or this fires at the wrong local time. Logs the timezone so you can check.
+ */
+function setupDailySnapshotTrigger() {
+  const existing = ScriptApp.getProjectTriggers();
+  for (const t of existing) {
+    if (t.getHandlerFunction() === 'recordDailySnapshot') {
+      ScriptApp.deleteTrigger(t);   // avoid stacking duplicates on re-run
+    }
+  }
+  ScriptApp.newTrigger('recordDailySnapshot')
+    .timeBased()
+    .atHour(18)
+    .everyDays(1)
+    .create();
+  Logger.log('Trigger installed: recordDailySnapshot daily 18:00-19:00');
+  Logger.log('Script timezone is: ' + Session.getScriptTimeZone() + '  (must be Asia/Taipei)');
 }

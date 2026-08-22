@@ -50,6 +50,14 @@ Built under the Universal SDLC (Standard tier). Source ledger: `股票 2023.xlsx
 - Live cards after the change: Current Value 7,964,823 · Invested 2,162,930 · Cost of Holdings 2,976,826 · Dividends 589,945 · ROI 187.38% · XIRR 25.89% · Simple CAGR 15.39%.
 - Known open: 3 金像電 2020 trades still have blank `股數` (2020-04-01 / 04-10 / 06-17), so the historical chart holds that position flat through 2020–2021; the 2023-06-05 星宇航空 row has `尚未交易 = Y` and 137 shares but a blank `股票`, so it never becomes a HeldLot. Some `CD轉入` rows tagged 國泰世華銀行轉入 are transfers back from the second broker rather than new outside capital — deferred by decision, still counted as capital.
 
+### Daily snapshot: stamp the trading session, not the run date (pending redeploy)
+- `recordDailySnapshot` stamped rows with `new Date()`, so a run before TWSE's 13:30 close wrote the *previous* session's close under today's date. Symptom: the daily chart's 2026-08-21 point (8,063,964) equalled the dashboard's **Yesterday** card rather than Friday's actual close (8,052,548), with duplicate weekday values across the series.
+- New `getLastTradeSession_()` probes Yahoo for 2330 and derives the session date from `meta.regularMarketTime` — the feed's own timestamp — since GOOGLEFINANCE returns a bare number with no session attached. Rows are upserted on that date, making re-runs idempotent.
+- Mid-session guard uses the timestamp's time-of-day (`>= 13:30` = closed). Yahoo's **chart** endpoint does not return `marketState` (that field is on the *quote* endpoint), so an earlier `marketState === 'REGULAR'` check was dead code and never fired.
+- Falls back to the run date if the probe fails (degrades to the old behaviour, not to no data). Duck-typed the `instanceof Date` check while in the file.
+- New `setupDailySnapshotTrigger()` installs a daily 18:00–19:00 trigger (deleting any existing one first) and logs `Session.getScriptTimeZone()` — triggers fire in the **script project's** timezone, which must be Asia/Taipei.
+- **Not deployed.** Live Apps Script is still v3 (built from `e911e89`); the repo is ~414 lines ahead, so redeploying also ships `GET_TAIWAN_STOCK_PRICE`, the snapshot/backfill functions, and the `getPricesFromSheet` date fix.
+
 ### Rev 3.3 (2026-08-11) — complete price coverage + trustworthy history start
 - **Fixed root cause of wrong early years:** the Prices tab only held *currently-owned* tickers, but the history chart reconstructs past positions from Trades — so every stock already sold (台積電, 鴻海, 友訊, 撼訊, 尼克森, 康那香, 力旺, 泰碩, 東元, 宏碁, 波若威, 車王電, 統懋, 華冠, 錦明, 國產, 花王, 金寶…) had no price and silently vanished from past values. `extract.py` now emits a price row for **every ticker ever traded**; 33 rows appended to the live sheet + 晶電's code filled.
   Effect: 2017 year-end value corrected 28,400 → **376,900**; 2019 115,560 → **994,883**.
