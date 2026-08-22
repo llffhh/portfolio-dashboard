@@ -84,6 +84,11 @@ function getSheetData(resource) {
 }
 
 function getPricesFromSheet(tickers, dates) {
+  // Called by doGet with parsed query params; default them so running this
+  // directly from the editor (no arguments) returns everything instead of
+  // throwing on `undefined.length`.
+  tickers = tickers || [];
+  dates = dates || [];
   // Prices tab layout: ticker | code | price (current, GOOGLEFINANCE) | <date columns...>
   // Returned PriceMap is keyed by ticker NAME (matches HeldLots/Trades), the 'price'
   // column is keyed under today's date, and date-headed columns keep their date key.
@@ -207,6 +212,30 @@ function GET_TAIWAN_STOCK_PRICE(code, dateStr) {
 }
 
 /**
+ * Current share count per ticker, from the HeldLots sheet. Ticker strings are
+ * trimmed — the source ledger contains stray trailing spaces ('台積電 ').
+ */
+function getCurrentHoldings_(ss) {
+  const sh = ss.getSheetByName('HeldLots');
+  if (!sh) return null;
+  const data = sh.getDataRange().getValues();
+  if (data.length <= 1) return null;
+  const hdr = data[0];
+  const tCol = hdr.indexOf('ticker'), sCol = hdr.indexOf('shares');
+  if (tCol < 0 || sCol < 0) return null;
+  const out = {};
+  for (let i = 1; i < data.length; i++) {
+    const t = data[i][tCol];
+    const n = Number(data[i][sCol]);
+    if (t && !isNaN(n)) {
+      const k = String(t).trim();
+      out[k] = (out[k] || 0) + n;
+    }
+  }
+  return out;
+}
+
+/**
  * Length of the DailyHistory rolling window, in days. Both the backfill's
  * default start and the prune in recordDailySnapshot derive from this, so the
  * two cannot drift apart (a backfill wider than the window is deleted by the
@@ -258,24 +287,8 @@ function recordDailySnapshot() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   
   // 1. Get current portfolio value
-  const heldLotsSheet = ss.getSheetByName('HeldLots');
-  if (!heldLotsSheet) return;
-  const heldLotsData = heldLotsSheet.getDataRange().getValues();
-  if (heldLotsData.length <= 1) return;
-  
-  const holdings = {};
-  const headers = heldLotsData[0];
-  const tickerCol = headers.indexOf('ticker');
-  const sharesCol = headers.indexOf('shares');
-  
-  for (let i = 1; i < heldLotsData.length; i++) {
-    const row = heldLotsData[i];
-    const ticker = row[tickerCol];
-    const shares = Number(row[sharesCol]);
-    if (ticker && !isNaN(shares)) {
-      holdings[ticker] = (holdings[ticker] || 0) + shares;
-    }
-  }
+  const holdings = getCurrentHoldings_(ss);
+  if (!holdings) return;
   
   const pricesSheet = ss.getSheetByName('Prices');
   if (!pricesSheet) return;
@@ -289,7 +302,7 @@ function recordDailySnapshot() {
   var totalValue = 0;
   for (let i = 1; i < pricesData.length; i++) {
     const row = pricesData[i];
-    const ticker = row[priceTickerCol];
+    const ticker = row[priceTickerCol] ? String(row[priceTickerCol]).trim() : '';
     const price = Number(row[priceValCol]);
     if (ticker && holdings[ticker] !== undefined && !isNaN(price)) {
       totalValue += holdings[ticker] * price;
@@ -502,13 +515,32 @@ function backfillDailySnapshots(start) {
   }
   
   const dailyValues = [];
-  
-  for (const date of dates) {
-    const holdings = {};
-    for (const trade of trades) {
-      if (trade.date <= date) {
-        holdings[trade.ticker] = (holdings[trade.ticker] || 0) + (trade.type === 'buy' ? trade.shares : -trade.shares);
-      }
+
+  // Positions are derived by walking BACKWARDS from today's known holdings,
+  // undoing each trade as we step past its date — not forwards from zero.
+  // The Trades sheet does not reconcile with HeldLots (missing buys/sells), so
+  // a forward replay is wrong on EVERY day by the size of that gap. Anchoring
+  // to HeldLots makes today exact by construction and confines any ledger gap
+  // to the days before the trade it belongs to.
+  const anchor = getCurrentHoldings_(ss);
+  if (!anchor) { Logger.log('No HeldLots — cannot anchor the reconstruction.'); return; }
+
+  const desc = trades.filter(t => t.date && !isNaN(t.shares))
+                     .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+
+  const holdings = {};
+  for (const k in anchor) holdings[k] = anchor[k];
+
+  let ti = 0;                       // index into `desc`, advances monotonically
+  const rowsDesc = [];
+  for (let i = dates.length - 1; i >= 0; i--) {
+    const date = dates[i];
+    // undo everything traded strictly after this date
+    while (ti < desc.length && desc[ti].date > date) {
+      const tr = desc[ti];
+      const tk = String(tr.ticker).trim();
+      holdings[tk] = (holdings[tk] || 0) - (tr.type === 'buy' ? tr.shares : -tr.shares);
+      ti++;
     }
     
     let totalValue = 0;
@@ -535,9 +567,10 @@ function backfillDailySnapshots(start) {
     }
     
     if (hasPricedStock) {
-      dailyValues.push([date, Math.round(totalValue)]);
+      rowsDesc.push([date, Math.round(totalValue)]);
     }
   }
+  for (let i = rowsDesc.length - 1; i >= 0; i--) dailyValues.push(rowsDesc[i]);
   
   if (dailyValues.length > 0) {
     historySheet.getRange(2, 1, dailyValues.length, 2).setValues(dailyValues);
