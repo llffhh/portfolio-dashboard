@@ -1,0 +1,864 @@
+{
+  "version": 2,
+  "tiers": {
+    "1": "Tier 1 - AI / 資料中心供應鏈",
+    "2": "Tier 2 - 科技，非 AI 主力",
+    "3": "Tier 3 - 非科技"
+  },
+  "segments": [
+    {
+      "id": "cowos_foundry",
+      "label": "Foundry and advanced packaging (CoWoS)",
+      "tier": 1
+    },
+    {
+      "id": "ai_server",
+      "label": "AI 伺服器 / 系統 (server and rack ODM/OEM)",
+      "tier": 1
+    },
+    {
+      "id": "abf_pcb",
+      "label": "ABF substrate and PCB",
+      "tier": 1
+    },
+    {
+      "id": "thermal_power",
+      "label": "Thermal management and power electronics",
+      "tier": 1
+    },
+    {
+      "id": "asic_ip",
+      "label": "ASIC design and silicon IP",
+      "tier": 1
+    },
+    {
+      "id": "optical_network",
+      "label": "Optical and networking components",
+      "tier": 1
+    },
+    {
+      "id": "test_epi",
+      "label": "IC testing and compound-semi epitaxy",
+      "tier": 2
+    },
+    {
+      "id": "memory_storage",
+      "label": "Memory and storage",
+      "tier": 2
+    },
+    {
+      "id": "consumer_ic",
+      "label": "Consumer and analog IC",
+      "tier": 2
+    },
+    {
+      "id": "panel_led",
+      "label": "Panel, LED and optics",
+      "tier": 2
+    },
+    {
+      "id": "shipping_air",
+      "label": "Shipping and air freight",
+      "tier": 3
+    },
+    {
+      "id": "finance_other",
+      "label": "Financials and other sectors",
+      "tier": 3
+    }
+  ],
+  "tickers": {
+    "台積電": {
+      "code": "2330",
+      "segment": "cowos_foundry"
+    },
+    "日月光投控": {
+      "code": "3711",
+      "segment": "cowos_foundry"
+    },
+    "力積電": {
+      "code": "6770",
+      "segment": "cowos_foundry"
+    },
+    "世界先進": {
+      "code": "5347",
+      "segment": "cowos_foundry"
+    },
+    "環球晶": {
+      "code": "6488",
+      "segment": "cowos_foundry"
+    },
+    "頎邦": {
+      "code": "6147",
+      "segment": "cowos_foundry"
+    },
+    "南茂": {
+      "code": "8150",
+      "segment": "cowos_foundry"
+    },
+    "矽格": {
+      "code": "6257",
+      "segment": "cowos_foundry"
+    },
+    "台灣光罩": {
+      "code": "2338",
+      "segment": "cowos_foundry"
+    },
+    "中美晶": {
+      "code": "5483",
+      "segment": "cowos_foundry"
+    },
+    "合晶": {
+      "code": "6182",
+      "segment": "cowos_foundry"
+    },
+    "漢磊": {
+      "code": "3707",
+      "segment": "cowos_foundry"
+    },
+    "帆宣": {
+      "code": "6196",
+      "segment": "cowos_foundry"
+    },
+    "廣達": {
+      "code": "2382",
+      "segment": "ai_server"
+    },
+    "緯創": {
+      "code": "3231",
+      "segment": "ai_server"
+    },
+    "緯穎": {
+      "code": "6669",
+      "segment": "ai_server"
+    },
+    "英業達": {
+      "code": "2356",
+      "segment": "ai_server"
+    },
+    "技嘉": {
+      "code": "2376",
+      "segment": "ai_server"
+    },
+    "神達": {
+      "code": "3706",
+      "segment": "ai_server"
+    },
+    "聯發科": {
+      "code": "2454",
+      "segment": "asic_ip"
+    },
+    "世芯-KY": {
+      "code": "3661",
+      "segment": "asic_ip"
+    },
+    "創意": {
+      "code": "3443",
+      "segment": "asic_ip"
+    },
+    "智原": {
+      "code": "3035",
+      "segment": "asic_ip"
+    },
+    "力旺": {
+      "code": "3529",
+      "segment": "asic_ip"
+    },
+    "晶心科": {
+      "code": "6533",
+      "segment": "asic_ip"
+    },
+    "信驊": {
+      "code": "5274",
+      "segment": "asic_ip"
+    },
+    "京元電子": {
+      "code": "2449",
+      "segment": "test_epi"
+    },
+    "穩懋": {
+      "code": "3105",
+      "segment": "test_epi"
+    },
+    "宏捷科": {
+      "code": "8086",
+      "segment": "test_epi"
+    },
+    "全新": {
+      "code": "2455",
+      "segment": "test_epi"
+    },
+    "環宇-KY": {
+      "code": "4991",
+      "segment": "test_epi"
+    },
+    "家登": {
+      "code": "3680",
+      "segment": "test_epi"
+    },
+    "弘塑": {
+      "code": "3131",
+      "segment": "test_epi"
+    },
+    "辛耘": {
+      "code": "3583",
+      "segment": "test_epi"
+    },
+    "志聖": {
+      "code": "5529",
+      "segment": "test_epi"
+    },
+    "均豪": {
+      "code": "5443",
+      "segment": "test_epi"
+    },
+    "汎銓": {
+      "code": "6830",
+      "segment": "test_epi"
+    },
+    "閎康": {
+      "code": "3587",
+      "segment": "test_epi"
+    },
+    "嘉晶": {
+      "code": "3016",
+      "segment": "test_epi"
+    },
+    "欣銓": {
+      "code": "3579",
+      "segment": "test_epi"
+    },
+    "南亞科": {
+      "code": "2408",
+      "segment": "memory_storage"
+    },
+    "華邦電": {
+      "code": "2344",
+      "segment": "memory_storage"
+    },
+    "旺宏": {
+      "code": "2337",
+      "segment": "memory_storage"
+    },
+    "群聯": {
+      "code": "8299",
+      "segment": "memory_storage"
+    },
+    "威剛": {
+      "code": "3260",
+      "segment": "memory_storage"
+    },
+    "宜鼎": {
+      "code": "5289",
+      "segment": "memory_storage"
+    },
+    "創見": {
+      "code": "2451",
+      "segment": "memory_storage"
+    },
+    "十銓": {
+      "code": "4967",
+      "segment": "memory_storage"
+    },
+    "鈺創": {
+      "code": "5351",
+      "segment": "memory_storage"
+    },
+    "晶豪科": {
+      "code": "3006",
+      "segment": "memory_storage"
+    },
+    "力成": {
+      "code": "6239",
+      "segment": "memory_storage"
+    },
+    "欣興": {
+      "code": "3037",
+      "segment": "abf_pcb"
+    },
+    "南亞電路板": {
+      "code": "8046",
+      "segment": "abf_pcb"
+    },
+    "景碩": {
+      "code": "3189",
+      "segment": "abf_pcb"
+    },
+    "台燿": {
+      "code": "6274",
+      "segment": "abf_pcb"
+    },
+    "健鼎": {
+      "code": "3044",
+      "segment": "abf_pcb"
+    },
+    "華通": {
+      "code": "2313",
+      "segment": "abf_pcb"
+    },
+    "燿華": {
+      "code": "2367",
+      "segment": "abf_pcb"
+    },
+    "敬鵬": {
+      "code": "2355",
+      "segment": "abf_pcb"
+    },
+    "定穎投控": {
+      "code": "6251",
+      "segment": "abf_pcb"
+    },
+    "金像電": {
+      "code": "2368",
+      "segment": "abf_pcb"
+    },
+    "崇越": {
+      "code": "5434",
+      "segment": "abf_pcb"
+    },
+    "聯茂": {
+      "code": "6213",
+      "segment": "abf_pcb"
+    },
+    "台光電": {
+      "code": "2383",
+      "segment": "abf_pcb"
+    },
+    "臻鼎-KY": {
+      "code": "4958",
+      "segment": "abf_pcb"
+    },
+    "長興材料": {
+      "code": "1717",
+      "segment": "abf_pcb"
+    },
+    "聯亞": {
+      "code": "3081",
+      "segment": "optical_network"
+    },
+    "上詮": {
+      "code": "3363",
+      "segment": "optical_network"
+    },
+    "智邦": {
+      "code": "2345",
+      "segment": "optical_network"
+    },
+    "中磊": {
+      "code": "5388",
+      "segment": "optical_network"
+    },
+    "台揚": {
+      "code": "2314",
+      "segment": "optical_network"
+    },
+    "仲琦": {
+      "code": "2419",
+      "segment": "optical_network"
+    },
+    "神準": {
+      "code": "3558",
+      "segment": "optical_network"
+    },
+    "明泰": {
+      "code": "3380",
+      "segment": "optical_network"
+    },
+    "正文": {
+      "code": "4906",
+      "segment": "optical_network"
+    },
+    "華星光": {
+      "code": "4979",
+      "segment": "optical_network"
+    },
+    "眾達-KY": {
+      "code": "4977",
+      "segment": "optical_network"
+    },
+    "波若威": {
+      "code": "3538",
+      "segment": "optical_network"
+    },
+    "亞光": {
+      "code": "3019",
+      "segment": "optical_network"
+    },
+    "瑞昱": {
+      "code": "2379",
+      "segment": "optical_network"
+    },
+    "凌陽": {
+      "code": "2401",
+      "segment": "consumer_ic"
+    },
+    "松翰": {
+      "code": "5471",
+      "segment": "consumer_ic"
+    },
+    "原相": {
+      "code": "3227",
+      "segment": "consumer_ic"
+    },
+    "盛群": {
+      "code": "6202",
+      "segment": "consumer_ic"
+    },
+    "茂達": {
+      "code": "6138",
+      "segment": "consumer_ic"
+    },
+    "通嘉": {
+      "code": "3588",
+      "segment": "consumer_ic"
+    },
+    "致新": {
+      "code": "8081",
+      "segment": "consumer_ic"
+    },
+    "類比科": {
+      "code": "3438",
+      "segment": "consumer_ic"
+    },
+    "富鼎": {
+      "code": "8261",
+      "segment": "consumer_ic"
+    },
+    "矽統": {
+      "code": "2363",
+      "segment": "consumer_ic"
+    },
+    "偉詮電": {
+      "code": "2436",
+      "segment": "consumer_ic"
+    },
+    "聯詠": {
+      "code": "3034",
+      "segment": "consumer_ic"
+    },
+    "瑞鼎": {
+      "code": "3592",
+      "segment": "consumer_ic"
+    },
+    "天鈺": {
+      "code": "4961",
+      "segment": "consumer_ic"
+    },
+    "義隆電": {
+      "code": "2458",
+      "segment": "consumer_ic"
+    },
+    "敦泰": {
+      "code": "3545",
+      "segment": "consumer_ic"
+    },
+    "矽力-KY": {
+      "code": "6415",
+      "segment": "consumer_ic"
+    },
+    "譜瑞-KY": {
+      "code": "4966",
+      "segment": "consumer_ic"
+    },
+    "國巨": {
+      "code": "2327",
+      "segment": "consumer_ic"
+    },
+    "華新科": {
+      "code": "2492",
+      "segment": "consumer_ic"
+    },
+    "友達": {
+      "code": "2409",
+      "segment": "panel_led"
+    },
+    "群創": {
+      "code": "3481",
+      "segment": "panel_led"
+    },
+    "晶電": {
+      "code": "2448",
+      "segment": "panel_led"
+    },
+    "富采": {
+      "code": "3714",
+      "segment": "panel_led"
+    },
+    "隆達": {
+      "code": "3698",
+      "segment": "panel_led"
+    },
+    "大立光": {
+      "code": "3008",
+      "segment": "panel_led"
+    },
+    "玉晶光": {
+      "code": "3406",
+      "segment": "panel_led"
+    },
+    "中光電": {
+      "code": "5371",
+      "segment": "panel_led"
+    },
+    "瀚宇彩晶": {
+      "code": "6116",
+      "segment": "panel_led"
+    },
+    "揚明光": {
+      "code": "3504",
+      "segment": "panel_led"
+    },
+    "達運": {
+      "code": "6120",
+      "segment": "panel_led"
+    },
+    "台達電": {
+      "code": "2308",
+      "segment": "thermal_power"
+    },
+    "光寶科": {
+      "code": "2301",
+      "segment": "thermal_power"
+    },
+    "群光": {
+      "code": "2385",
+      "segment": "thermal_power"
+    },
+    "建準": {
+      "code": "2421",
+      "segment": "thermal_power"
+    },
+    "力致": {
+      "code": "3060",
+      "segment": "thermal_power"
+    },
+    "順達": {
+      "code": "3211",
+      "segment": "thermal_power"
+    },
+    "康舒": {
+      "code": "6282",
+      "segment": "thermal_power"
+    },
+    "全漢": {
+      "code": "3015",
+      "segment": "thermal_power"
+    },
+    "中興電": {
+      "code": "1513",
+      "segment": "thermal_power"
+    },
+    "士電": {
+      "code": "1503",
+      "segment": "thermal_power"
+    },
+    "亞力": {
+      "code": "1514",
+      "segment": "thermal_power"
+    },
+    "華城": {
+      "code": "1519",
+      "segment": "thermal_power"
+    },
+    "奇鋐": {
+      "code": "3017",
+      "segment": "thermal_power"
+    },
+    "雙鴻": {
+      "code": "3324",
+      "segment": "thermal_power"
+    },
+    "健策": {
+      "code": "3653",
+      "segment": "thermal_power"
+    },
+    "長榮": {
+      "code": "2603",
+      "segment": "shipping_air"
+    },
+    "陽明": {
+      "code": "2609",
+      "segment": "shipping_air"
+    },
+    "萬海": {
+      "code": "2615",
+      "segment": "shipping_air"
+    },
+    "長榮航": {
+      "code": "2618",
+      "segment": "shipping_air"
+    },
+    "華航": {
+      "code": "2610",
+      "segment": "shipping_air"
+    },
+    "台驊投控": {
+      "code": "2636",
+      "segment": "shipping_air"
+    },
+    "中菲行": {
+      "code": "5609",
+      "segment": "shipping_air"
+    },
+    "台灣航業": {
+      "code": "2617",
+      "segment": "shipping_air"
+    },
+    "裕民": {
+      "code": "2606",
+      "segment": "shipping_air"
+    },
+    "新興": {
+      "code": "2605",
+      "segment": "shipping_air"
+    },
+    "慧洋-KY": {
+      "code": "2637",
+      "segment": "shipping_air"
+    },
+    "益航": {
+      "code": "2601",
+      "segment": "shipping_air"
+    },
+    "中航": {
+      "code": "2612",
+      "segment": "shipping_air"
+    },
+    "富邦金": {
+      "code": "2881",
+      "segment": "finance_other"
+    },
+    "國泰金": {
+      "code": "2882",
+      "segment": "finance_other"
+    },
+    "中信金": {
+      "code": "2891",
+      "segment": "finance_other"
+    },
+    "兆豐金": {
+      "code": "2886",
+      "segment": "finance_other"
+    },
+    "玉山金": {
+      "code": "2884",
+      "segment": "finance_other"
+    },
+    "第一金": {
+      "code": "2892",
+      "segment": "finance_other"
+    },
+    "合庫金": {
+      "code": "5880",
+      "segment": "finance_other"
+    },
+    "元大金": {
+      "code": "2885",
+      "segment": "finance_other"
+    },
+    "華南金": {
+      "code": "2880",
+      "segment": "finance_other"
+    },
+    "台新金": {
+      "code": "2887",
+      "segment": "finance_other"
+    },
+    "開發金": {
+      "code": "2883",
+      "segment": "finance_other"
+    },
+    "新光金": {
+      "code": "2888",
+      "segment": "finance_other"
+    },
+    "永豐金": {
+      "code": "2890",
+      "segment": "finance_other"
+    },
+    "國票金": {
+      "code": "2889",
+      "segment": "finance_other"
+    },
+    "統一超": {
+      "code": "2912",
+      "segment": "finance_other"
+    },
+    "中華電": {
+      "code": "2412",
+      "segment": "finance_other"
+    },
+    "台灣大": {
+      "code": "3045",
+      "segment": "finance_other"
+    },
+    "遠傳": {
+      "code": "4904",
+      "segment": "finance_other"
+    },
+    "統一": {
+      "code": "1216",
+      "segment": "finance_other"
+    },
+    "台泥": {
+      "code": "1101",
+      "segment": "finance_other"
+    },
+    "中鋼": {
+      "code": "2002",
+      "segment": "finance_other"
+    },
+    "台塑": {
+      "code": "1301",
+      "segment": "finance_other"
+    },
+    "南亞": {
+      "code": "1303",
+      "segment": "finance_other"
+    },
+    "台化": {
+      "code": "1326",
+      "segment": "finance_other"
+    },
+    "台塑化": {
+      "code": "6505",
+      "segment": "finance_other"
+    },
+    "中壽": {
+      "code": "2823",
+      "segment": "finance_other"
+    },
+    "中租-KY": {
+      "code": "5871",
+      "segment": "finance_other"
+    },
+    "和泰車": {
+      "code": "2207",
+      "segment": "finance_other"
+    },
+    "亞泥": {
+      "code": "1102",
+      "segment": "finance_other"
+    },
+    "台灣高鐵": {
+      "code": "2633",
+      "segment": "finance_other"
+    },
+    "上海商銀": {
+      "code": "5876",
+      "segment": "finance_other"
+    },
+    "台灣企銀": {
+      "code": "2834",
+      "segment": "finance_other"
+    },
+    "遠東新": {
+      "code": "1402",
+      "segment": "finance_other"
+    },
+    "儒鴻": {
+      "code": "1476",
+      "segment": "finance_other"
+    },
+    "聚陽": {
+      "code": "1477",
+      "segment": "finance_other"
+    },
+    "寶成": {
+      "code": "9904",
+      "segment": "finance_other"
+    },
+    "正新": {
+      "code": "2105",
+      "segment": "finance_other"
+    },
+    "全家": {
+      "code": "5903",
+      "segment": "finance_other"
+    },
+    "裕隆": {
+      "code": "2201",
+      "segment": "finance_other"
+    },
+    "華碩": {
+      "code": "2357",
+      "segment": "ai_server"
+    },
+    "宏碁": {
+      "code": "2353",
+      "segment": "finance_other"
+    },
+    "微星": {
+      "code": "2377",
+      "segment": "ai_server"
+    },
+    "和碩": {
+      "code": "4938",
+      "segment": "ai_server"
+    },
+    "鴻海": {
+      "code": "2317",
+      "segment": "ai_server"
+    },
+    "研華": {
+      "code": "2395",
+      "segment": "finance_other"
+    },
+    "大聯大": {
+      "code": "3702",
+      "segment": "finance_other"
+    },
+    "文曄": {
+      "code": "3036",
+      "segment": "finance_other"
+    },
+    "上銀": {
+      "code": "2049",
+      "segment": "finance_other"
+    },
+    "亞德客-KY": {
+      "code": "1590",
+      "segment": "finance_other"
+    },
+    "聯電": {
+      "code": "2303",
+      "segment": "cowos_foundry"
+    },
+    "仁寶": {
+      "code": "2324",
+      "segment": "ai_server"
+    },
+    "智易": {
+      "code": "3596",
+      "segment": "optical_network"
+    },
+    "聯陽": {
+      "code": "5259",
+      "segment": "consumer_ic"
+    },
+    "力智": {
+      "code": "6719",
+      "segment": "consumer_ic"
+    },
+    "大成鋼": {
+      "code": "2027",
+      "segment": "finance_other"
+    },
+    "力麗": {
+      "code": "1444",
+      "segment": "finance_other"
+    },
+    "星宇航空": {
+      "code": "2646",
+      "segment": "shipping_air"
+    },
+    "藍新資訊": {
+      "code": "6994",
+      "segment": "finance_other"
+    },
+    "大亞": {
+      "code": "1609",
+      "segment": "finance_other"
+    }
+  }
+}

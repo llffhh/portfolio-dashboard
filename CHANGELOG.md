@@ -1,5 +1,29 @@
 # Changelog
 
+## [Rev 4.1] — Sell Planner & dividend yield on cost (2026-09-10)
+
+Built under the Universal SDLC (Standard tier); Phase 2 coded by a Sonnet subagent (the Gemini CLI route is
+blocked by the auto-mode classifier). Contracts in `design.md` §A.2c and §C.
+
+### Added
+- **賣股規劃 / Sell Planner tab** (`src/sellplanner.js`, `src/sellplanner-ui.js`): plans a fixed net cash target (`TARGET_NET`) across current holdings. Four peer strategies side by side — tag-tiered, yield-protect, proportional, cut-losers — plus a persistent custom plan as a fifth card. Proceeds are net of 證交稅 0.3% and brokerage 0.1425% × discount with the NT$20 floor; 零股 precision; per-ticker locks; per-tier breakdown of each sale; named scenarios in `localStorage`; CSV + text export. No Apps Script change, no new network call.
+- **Segment reference table** (`src/segments.json`): ~200 TWSE companies across 12 supply-chain segments and 3 tiers, built from public index membership. Describes what a company makes — nothing in the planner forecasts price or return, and no strategy is labelled recommended.
+- **Dividend yield on cost** (MET-13): dashboard card and a per-holding column, cost-weighted across the portfolio.
+- **Selectable dividend window** (SP-18): 5-year / 3-year / latest 12 months. Drives every yield figure and the yield-protect ranking; the dashboard shows 5-year and 12-month side by side.
+
+### Fixed (Phase 3 audit)
+- Segment tiers were assigned by semiconductor purity rather than AI-supply-chain membership, which inverted tag-tiered's intent and sold thermal, rack-power and server-ODM names first. Normative segment→tier binding added (SP-12), `ai_server` segment added, and unmapped tickers now default to neutral tier 2 instead of sell-first (SP-13). Root cause partly in the Phase 1 spec, which never bound tier labels to segment ids.
+- Reference table missed major index constituents and misfiled large system builders under the non-tech catch-all (SP-14/15).
+- Strategy cards rendered only net raised — nearly identical across strategies by construction — so the comparison metrics `summarize()` computed never reached the screen (SP-5).
+- Switching strategy cards silently discarded custom edits, and card clicks left the progress bar and totals stale (SP-16).
+
+### Known limitations
+- The planner needs live prices; offline mode serves buy prices and is blocked by design.
+- Yields are approximate: past dividends reflect the share count held then, not now.
+- `finance_other` doubles as the catch-all, so an unclassifiable tech company lands in tier 3.
+
+Tests: 58 (Vitest).
+
 ## [Unreleased] — Portfolio Dashboard MVP
 
 Built under the Universal SDLC (Standard tier). Source ledger: `股票 2023.xlsx`.

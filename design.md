@@ -89,6 +89,11 @@ Pure functions, no I/O.
 
 *Known limitation (extends L4): delisted/renamed tickers sold in the past have no GOOGLEFINANCE history → early-year V slightly understated; surfaced in the review notice.*
 
+### A.2c Rev 4.1 addition (approved 2026-09-10)
+| Fn | Signature | Definition / invariant |
+|---|---|---|
+| `yieldOnCost` | `({ticker:{shares,cost}}, annualDividendOf) -> {byTicker, annualDividend, cost, yieldPct}` | **MET-13:** per ticker `yieldPct = annualDividend / cost × 100`; portfolio `yieldPct = Σ annualDividend / Σ cost × 100` — **cost-weighted, never a mean of per-ticker ratios**. `cost == 0` ⇒ `yieldPct: null` (not `Infinity`, not `E_DIV_ZERO_COST` — a zero-cost lot is a data artifact, not a metric failure). Only tickers present in `holdings` contribute, so dividends from sold-out positions cannot inflate the total. The trailing-window convention is **injected** via `annualDividendOf`, not reimplemented, so it stays defined once in `annualDividendFor` (SP-3). **Approximate for the same reason as SP-3** — past dividends reflect the share count held then, not now; every surface must label it approximate. Needs no price data, so unlike the planner it is meaningful offline. |
+
 ### A.3 XIRR & CAGR assembly
 - `buildXirrCashflows(Deposit[], Dividend[], withdrawals, terminalValue, terminalDate) -> {date,amount}[]` — **CF-1:** deposits → `−amount`; dividends → `+amount`; withdrawals (CD轉出) → `+amount`; terminal → `+terminalValue` at `terminalDate`. (Account-level money-weighted return.)
 - **Simple CAGR inputs (CF-2):** `beginValue = investedCapital`, `endValue = currentValue + totalDividends`, `years = (terminalDate − earliest Deposit.date)/365.25`.
@@ -195,6 +200,197 @@ No "other errors" escape hatch.
 - Lot-based schema (rev 3) adopted because the ledger already records current positions/cost explicitly (`尚未交易=Y`, `目前投資金額`), which is more reliable than reconstructing from flow and eliminates the negative-holdings artifact.
 - Google + Apps Script consolidates data access and price fetching server-side (no CORS proxy, no browser OAuth lib).
 - JS metrics engine (browser-side, Vitest-testable); `extract.py` stays Python for the messy xlsx seed.
+
+---
+
+## Section C — Rev 4.0 Sell Planner (approved 2026-09-10)
+
+**Goal:** raise **NT$2,000,000 net of tax and fees** out of the current portfolio, showing four
+independently-computed candidate plans side by side plus a user-edited plan, persisted locally.
+
+**Scope boundary (binding on the implementation):** segment tags state what a company *makes*. No
+function in this section forecasts price or return, and no strategy is labeled recommended. Ranking rules
+are transparent and a per-ticker user override outranks every rule.
+
+### C.0 New schemas
+```
+SegmentMap = {                          // src/segments.json, committed
+  version: number
+  tiers:    { "1"|"2"|"3": string }     // display labels
+  segments: { id: string, label: string, tier: 1|2|3 }[]
+  tickers:  { [chineseName: string]: { code: string, segment: string } }
+}
+
+SellCandidate = {                       // one per PRICEABLE held ticker
+  ticker, code, segment, tier,
+  shares, cost, price, value,           // value = shares × price
+  plPct,                                // (value − cost) / cost
+  annualDividend, yieldPct,             // SP-3
+  weightPct                             // value / Σ value
+}
+
+SellRow  = { ticker, sellShares, sellPct, gross, tax, fee, net, realizedPL }
+SellPlan = { strategyId, rows: SellRow[], totals, feasible, shortfall, spilledIntoTier }
+SavedScenario = { id, name, savedAt, strategyId, locked: string[], rows: {ticker,sellShares}[], note }
+```
+
+### C.1 Sell-planner engine — `src/sellplanner.js` (pure, no I/O, mirrors A.2)
+
+| Fn | Signature | Definition / invariant |
+|---|---|---|
+| `buildCandidates` | `({ticker:{shares,cost}}, PriceMap, asOf, Dividend[], SegmentMap) -> {candidates, excluded}` | **SP-1:** one `SellCandidate` per held ticker with a price at `asOf`. A ticker with no price is **excluded**, never valued at cost — returned in `excluded` with a reason (`no_price` / `delisted` / `null_shares`). Unmapped ticker ⇒ `{segment:"unknown", tier:3}`, also listed in `excluded.unmapped` (informational — it stays a candidate). |
+| `proceeds` | `(shares, price, {discount=1.0}) -> {gross,tax,fee,net}` | **SP-2:** `gross = shares×price`; `tax = gross×0.003` (證交稅, sell side only); `fee = max(20, gross×0.001425×discount)` (brokerage, NT$20 floor per order); `net = gross − tax − fee`. `discount` default **1.0** so `net` is conservative (understated ⇒ plan raises ≥ target). |
+| `annualDividendFor` | `(ticker, Dividend[], asOf) -> number` | **SP-3:** `Σ dividends where date ≥ asOf − 5y` ÷ 5. Matched on trimmed `Dividend.name`. **Approximate by construction** — past dividends reflect the share count held then, not now; every surface that shows `yieldPct` must label it approximate. |
+| `solveFill` | `(SellCandidate[], target, opts) -> SellPlan` | **SP-4:** walk the (already sorted) list taking whole positions until the running `net` would meet `target`; solve the final position's `sellShares` so cumulative `net ≥ target`, rounding **up** to whole shares. Shares are integers; 零股 permitted (no 1,000-share rounding). Positions after the fill point get `sellShares = 0`. |
+| `summarize` | `(SellPlan, SellCandidate[]) -> PlanSummary` | **SP-5:** `positionsTouched`, `positionsLiquidated`, `realizedPL`, `annualDividendGivenUp` (`Σ annualDividend × sellPct`), `tier1ValueSoldPct`, `taxAndFees`, and remaining-portfolio `value` / `yieldPct` / `tier1WeightPct`. |
+
+**SP-6 — Strategies.** Each is a pure comparator `(SellCandidate[]) -> SellCandidate[]`, fed to the same
+`solveFill`. Ties break on higher `value` then `ticker` so output is deterministic.
+
+| id | Ordering rule |
+|---|---|
+| `tagTiered` | tier 3 → 2 → 1; within a tier, lowest `yieldPct` first |
+| `yieldProtect` | lowest `yieldPct` first, tier ignored |
+| `proportional` | not a sort — one scale factor `k` applied to every candidate, solved so `Σ net(shares×k) = target` |
+| `cutLosers` | lowest `plPct` first |
+
+**SP-7 — Locks and custom.** `locked: string[]` removes those tickers from the candidate list before
+sorting; all four strategies re-solve against the reduced set. Editing any `sellShares` switches the
+active plan to `custom` (seeded from the strategy it was edited from) and stops re-solving — `custom` is
+never auto-adjusted, only recomputed for proceeds.
+
+**SP-8 — Feasibility.** If `Σ net(all candidates) < target`: `feasible=false`, `shortfall = target − Σ net`,
+`rows` = the full liquidation, and the UI states the target is unreachable. `tagTiered` recording
+`spilledIntoTier = 1|2` is **not** infeasibility — it is the expected outcome (tiers 2+3 do not cover 2M)
+and must be shown as an explicit note, not hidden by the ranking.
+
+**SP-9 — Conservation.** For every plan: `Σ rows.gross == Σ shares×price` over touched rows, and
+`totals.net == Σ rows.net` to within NT$0.01. `sellShares ≤ candidate.shares` always.
+
+**SP-10 — Target.** `TARGET_NET = 2_000_000`, a single exported constant — the one place the goal changes.
+
+### C.2 Persistence — `localStorage`
+- Key `sellPlanner.scenarios.v1` → `SavedScenario[]`. **SP-11:** scenarios store *share counts, not prices*,
+  so a reloaded scenario re-prices at today's market; the UI shows the drift in net proceeds since `savedAt`.
+- Unparseable or wrong-`version` payload ⇒ `E_SCENARIO_CORRUPT`, surfaced and the store left untouched
+  (never silently cleared).
+- Export: CSV `ticker,code,shares,price,gross,tax,fee,net,realizedPL` + a text summary, via `Blob` +
+  object URL. No backend, no Apps Script change anywhere in Rev 4.0.
+
+### C.3 Error taxonomy additions (extends A.7, still closed)
+| Code | Trigger |
+|---|---|
+| `E_PLAN_INFEASIBLE` | `Σ net` over all candidates `< TARGET_NET` (SP-8). |
+| `E_SCENARIO_CORRUPT` | `sellPlanner.scenarios.v1` fails to parse or carries an unknown version. |
+| `E_PLAN_NO_CANDIDATES` | Every held ticker was excluded or locked — nothing left to plan against. |
+
+### C.4 Blueprint
+- `src/sellplanner.js` — C.1, pure. `src/sellplanner-ui.js` — rendering, edit handlers, localStorage,
+  export; exports `initSellPlanner(ctx)`. `src/segments.json` — C.0 map, seeded as a **general ~150-name
+  TWSE reference table across all segments**, not only held tickers, so committing it to the public repo
+  discloses nothing about the actual position (B.3 trust boundary).
+- `index.html` — `Dashboard | 賣股規劃` tab bar; planner section = comparison strip (4 strategy cards) →
+  editable detail table → sticky net-raised-vs-target progress bar → discount input → scenario list →
+  export. Reuses existing `.card` / `.notice` / `.btn-toggle` styles; no new CSS framework, no new CDN.
+- `src/app.js` — one added call after the existing load:
+  `initSellPlanner({ holdings, priceMap, priceToday, divs, reviewLots, offline })`. `init()` is otherwise
+  untouched. Entry tag → `src/app.js?v=7`; internal imports version-tagged (`./sellplanner.js?v=1`) per the
+  module-graph caching gotcha in B.6/task.md.
+
+**C.5 Offline block.** `MockPriceSource` serves *buy* prices (`data/prices.json`), so offline every
+`plPct` is 0 and `value == cost`. The planner renders a blocking banner and computes no plan when
+`offline` is true — a plausible-looking wrong plan is worse than no plan.
+
+**C.6 Known data exclusions** (surfaced in the planner notice, never silently dropped): 晶電 (delisted,
+merged into 富采 — stale quote, force-excluded); lots with null `股數` (A.2 MET-1 review lots); any held
+ticker without a `GOOGLEFINANCE` price.
+
+### C.7 Segment → tier binding (amendment, 2026-09-10 — Phase 3 audit)
+
+C.0 named the tier labels and C.4 listed the segment ids, but **nothing bound one to the other**. The
+first implementation filled the gap with a *semiconductor-purity* ranking (tier 1 = "core semiconductor"),
+which inverts the intent: `tagTiered` sells tier 3 first, so AI server ODM, thermal and rack-power names
+were liquidated before consumer IC and commodity memory. The binding below is now normative.
+
+**SP-12 — Tier is a property of the segment, not a judgment call.** `segments[].tier` MUST be exactly:
+
+| Tier | Label (C.0) | Segment ids |
+|---|---|---|
+| 1 | AI / 資料中心供應鏈 | `cowos_foundry`, `ai_server`, `abf_pcb`, `thermal_power`, `asic_ip`, `optical_network` |
+| 2 | 科技，非 AI 主力 | `test_epi`, `memory_storage`, `consumer_ic`, `panel_led` |
+| 3 | 非科技 | `shipping_air`, `finance_other` |
+
+`ai_server` (AI 伺服器 / 系統 — server and rack ODM/OEM) was present in the C.0 example but **missing from
+the C.4 enumeration**; it is a required segment id. Rationale for the two non-obvious placements, recorded
+so they can be argued with rather than guessed at: `thermal_power` is tier 1 because liquid cooling and
+rack power sell directly into AI datacenter buildout, not despite being non-semiconductor; `memory_storage`
+is tier 2 because the holdings it covers are mostly commodity/niche memory rather than HBM. Neither is a
+forecast — both are statements about where the revenue comes from, and the user can move any ticker by
+editing `src/segments.json`.
+
+**SP-13 — Unmapped tickers are neutral, never sell-first.** A ticker absent from `SegmentMap.tickers`
+resolves to `{ segment: "unknown", tier: 2 }` — **not tier 3**. Defaulting an unknown to tier 3 makes
+`tagTiered` liquidate it first on no evidence, which is the most destructive possible reading of missing
+data. It stays a candidate, and it MUST appear in the planner notice (already required by SP-1).
+*(This supersedes the `tier:3` default stated in C.0 and C.1/SP-1.)*
+
+**SP-14 — Reference table coverage.** `src/segments.json` MUST cover, at minimum, every constituent of the
+**台灣50 (0050)** and **中型100 (0051)** indices, plus the named AI-supply-chain suppliers in each segment
+above — a public, general membership criterion. This is what keeps the file both *useful* (it must
+actually classify a real Taiwanese portfolio; the first cut left 17 of 45 held tickers unmapped) and
+*safe to commit* (membership is derived from public index composition, never from `data/`). Building the
+table by reading the owner's ledger remains prohibited.
+
+**SP-15 — Classification is by primary revenue source.** Assign the segment describing what the company
+mainly *sells*, not its most newsworthy product line. Errors found in the first cut, for the record:
+聯詠 and 瑞鼎 are display-driver IC (`consumer_ic`), not `asic_ip`; 京元電子 is IC test (`test_epi`), not
+`cowos_foundry`.
+
+
+
+---
+
+
+### C.8 Custom plan as a peer card (amendment, 2026-09-10)
+
+**SP-16 — The custom plan is the fifth card, and it persists.** The comparison strip renders one card per
+strategy **plus one for `custom`**, so all five are comparable at a glance. `custom` is held in its own
+state, independent of the active selection: clicking between cards to compare no longer discards the
+user's edits, which the original single-`activePlan` implementation did silently. Selecting any card must
+re-render the strip, the progress bar **and** the totals block — the first implementation omitted the
+progress/totals refresh, so a card click left stale figures on screen.
+
+With no edits yet, the fifth card renders as an empty slot that seeds a custom plan from the currently
+selected one when clicked, rather than as a dead or missing card.
+
+**SP-17 — A lock change invalidates the custom plan.** Toggling 鎖定不賣 changes the candidate set, so a
+custom plan built against the old set is no longer well defined. It is dropped and the empty slot says
+*why*. Re-solving it silently against the new set would misrepresent numbers the user entered by hand.
+
+---
+
+
+### C.9 Dividend window is a parameter (amendment, 2026-09-10)
+
+**SP-18 — `annualDividendFor` takes a `years` window; 5 is a default, not a constant.** SP-3 fixed the
+window at five years. On this ledger that spans the 2021–22 shipping super-cycle, so trailing averages
+can sit several times above a position's latest 12-month payout — in the audit, one shipping holding's
+5-year figure was roughly five times its 12-month figure, and another paid nothing in the window. Averaging a one-off cycle into a "yield" is a
+distortion, not a smoothing, and it mis-ranks `yieldProtect` — which is the strategy whose entire job is
+knowing which income is worth keeping.
+
+The window is therefore selectable (5-year / 3-year / latest 12 months) and drives **every** yield
+surface at once: the detail-table column, `yieldProtect`'s ordering, and `summarize`'s
+`annualDividendGivenUp`. Default stays 5 for continuity with saved scenarios. A non-positive or
+non-numeric `years` falls back to 5 rather than dividing by zero.
+
+Changing the window does **not** invalidate a custom plan (unlike a lock change, SP-17): only the yield
+figures move, and the hand-entered share counts remain well defined.
+
+**This narrows but does not remove the SP-3 approximation.** A shorter window still measures dividends
+received against the share count held *then*, and a single missed or shifted payment date swings a
+12-month figure hard. Both windows stay labelled approximate. Neither is a forecast: the dashboard reports
+what was actually paid over a chosen past window, and says which window it used.
 
 ---
 

@@ -178,3 +178,35 @@ export function buildXirrCashflows(deposits, divs, withdrawals, terminalValue, t
   
   return flows.sort((a, b) => new Date(a.date) - new Date(b.date));
 }
+
+// MET-13 (Rev 4.1): dividend yield on COST basis — annual dividends ÷ cost basis,
+// per ticker and portfolio-wide. `annualDividendOf(ticker)` is injected rather than
+// computed here so the trailing-window convention stays defined in exactly one
+// place (annualDividendFor, sellplanner.js SP-3).
+//
+// APPROXIMATE by construction, for the same reason as SP-3: dividends received in
+// the past reflect the share count held at the time, not the current position.
+// Only currently-held tickers contribute, so dividends from sold-out positions
+// never inflate the portfolio figure.
+export function yieldOnCost(holdings, annualDividendOf) {
+  const byTicker = {};
+  let totalAnnual = 0;
+  let totalCost = 0;
+  for (const [ticker, data] of Object.entries(holdings)) {
+    const cost = data.cost || 0;
+    const annual = annualDividendOf(ticker) || 0;
+    byTicker[ticker] = {
+      annualDividend: annual,
+      cost,
+      yieldPct: cost > 0 ? (annual / cost) * 100 : null
+    };
+    totalAnnual += annual;
+    totalCost += cost;
+  }
+  return {
+    byTicker,
+    annualDividend: totalAnnual,
+    cost: totalCost,
+    yieldPct: totalCost > 0 ? (totalAnnual / totalCost) * 100 : null
+  };
+}

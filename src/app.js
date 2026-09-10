@@ -4,8 +4,10 @@ import { getConfig, saveConfig } from './settings.js?v=32';
 import {
   currentHoldings, costOfHoldings, investedCapital, currentValue,
   roi, xirr, simpleCagr, dividendsByYear, depositsByYear, yearlyPnL,
-  portfolioValueOverTime, buildXirrCashflows
-} from './metrics.js?v=32';
+  portfolioValueOverTime, buildXirrCashflows, yieldOnCost
+} from './metrics.js?v=33';
+import { initSellPlanner } from './sellplanner-ui.js?v=5';
+import { annualDividendFor } from './sellplanner.js?v=3';
 
 // Shares held per ticker as of a date (tolerant app-side variant of MET-9's
 // reconstruction — missing prices are skipped and surfaced, not thrown).
@@ -107,6 +109,11 @@ async function init() {
     const servedDates = [...new Set(Object.values(priceMap).flatMap(m => Object.keys(m)))]
       .filter(k => /^\d{4}-\d{2}-\d{2}$/.test(k)).sort();
     const priceToday = servedDates[servedDates.length - 1] || today;
+
+    // Rev 4.0 (design.md Section C): sell planner, wired to the same load —
+    // offline = using MockPriceSource (buy prices only, C.5 blocking banner).
+    initSellPlanner({ holdings, priceMap, priceToday, divs, reviewLots, offline: priceSource instanceof MockPriceSource })
+      .catch(err => console.error('Sell planner init error', err));
 
     // Filter review lots (null shares) and missing prices
     const noPriceTickers = new Set();
@@ -327,6 +334,20 @@ async function init() {
       console.warn("Could not render yearly charts", e);
     }
 
+    // MET-13: dividend yield on cost. Same 5-yr trailing convention as SP-3,
+    // so the dashboard card and the planner's yield column never disagree.
+    const yoc = yieldOnCost(holdings, t => annualDividendFor(t, divs, priceToday, 5));
+    // SP-18: show the latest-12-month figure beside the 5-year average. A 5-year
+    // window spans the 2021-22 shipping cycle, so the average alone can read far
+    // above what the portfolio currently pays.
+    const yoc1 = yieldOnCost(holdings, t => annualDividendFor(t, divs, priceToday, 1));
+    document.getElementById('val-yoc').textContent =
+      yoc.yieldPct == null ? 'N/A' : `${yoc.yieldPct.toFixed(2)}%`;
+    document.getElementById('val-yoc-label').innerHTML =
+      `approximate — ${Math.round(yoc.annualDividend).toLocaleString()}/yr avg ÷ ${Math.round(yoc.cost).toLocaleString()} cost`
+      + `<br>latest 12 months: <strong>${yoc1.yieldPct == null ? 'N/A' : yoc1.yieldPct.toFixed(2) + '%'}</strong>`
+      + ` (${Math.round(yoc1.annualDividend).toLocaleString()})`;
+
     // Table
     const tbody = document.querySelector('#holdingsTable tbody');
     for (const [ticker, data] of Object.entries(holdings)) {
@@ -343,6 +364,7 @@ async function init() {
           <td>${data.cost.toLocaleString()}</td>
           <td>${price ? val.toLocaleString() : 'N/A'}</td>
           <td>${plText}</td>
+          <td>${yoc.byTicker[ticker]?.yieldPct == null ? 'N/A' : yoc.byTicker[ticker].yieldPct.toFixed(2) + '%'}<span class="label"> / ${yoc1.byTicker[ticker]?.yieldPct == null ? 'N/A' : yoc1.byTicker[ticker].yieldPct.toFixed(2) + '%'}</span></td>
         </tr>
       `;
     }

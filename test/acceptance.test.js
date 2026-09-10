@@ -10,6 +10,7 @@ import {
   xirr,
   simpleCagr,
   dividendsByYear,
+  yieldOnCost,
   depositsByYear,
   yearlyPnL,
   portfolioValueOverTime,
@@ -231,5 +232,36 @@ describe('Acceptance Tests (design.md Section A)', () => {
       expect(prices).toHaveProperty('台積電');
       expect(prices['台積電']).toHaveProperty('2020-12-31', 530);
     });
+  });
+});
+
+describe('MET-13 — dividend yield on cost (Rev 4.1)', () => {
+  const holdings = { A: { shares: 100, cost: 1000 }, B: { shares: 50, cost: 500 } };
+  const annual = { A: 50, B: 100 };
+  const divOf = (t) => annual[t] ?? 0;
+
+  it('MET-13: per-ticker yield = annual dividend / cost, as a percentage', () => {
+    const r = yieldOnCost(holdings, divOf);
+    expect(r.byTicker.A.yieldPct).toBeCloseTo(5, 10);
+    expect(r.byTicker.B.yieldPct).toBeCloseTo(20, 10);
+  });
+
+  it('MET-13: portfolio yield uses summed dividends over summed cost, not an average of ratios', () => {
+    const r = yieldOnCost(holdings, divOf);
+    expect(r.annualDividend).toBe(150);
+    expect(r.cost).toBe(1500);
+    expect(r.yieldPct).toBeCloseTo(10, 10);
+    // the naive mean of 5% and 20% would be 12.5% — cost-weighting is the contract
+    expect(r.yieldPct).not.toBeCloseTo(12.5, 3);
+  });
+
+  it('MET-13: zero cost yields null rather than Infinity, and empty holdings yield null', () => {
+    expect(yieldOnCost({ Z: { shares: 1, cost: 0 } }, () => 9).byTicker.Z.yieldPct).toBeNull();
+    expect(yieldOnCost({}, () => 0).yieldPct).toBeNull();
+  });
+
+  it('MET-13: only currently-held tickers contribute — a sold-out payer cannot inflate the total', () => {
+    const r = yieldOnCost(holdings, (t) => (t === 'SOLD' ? 99999 : divOf(t)));
+    expect(r.annualDividend).toBe(150);
   });
 });
