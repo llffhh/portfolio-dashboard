@@ -181,6 +181,84 @@ export function buildSummaryText(plan, summary) {
   return lines.join('\n');
 }
 
+// SP-21: localStorage behind the same async interface as SheetScenarioStore,
+// so the UI treats the two stores identically.
+export class LocalScenarioStore {
+  constructor(storage = defaultStorage()) { this.storage = storage; }
+  async list() { return loadScenarios(this.storage); }
+  async save(scenario) { saveScenario(scenario, this.storage); }
+  async remove(id) { deleteScenario(id, this.storage); }
+}
+
+export const MIGRATED_KEY = 'sellPlanner.migratedToSheet.v1';
+export const PENDING_KEY = 'sellPlanner.pendingUpload.v1';
+
+function readPending(storage) {
+  try {
+    const v = JSON.parse(storage.getItem(PENDING_KEY) || '[]');
+    return Array.isArray(v) ? v : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+// Records a plan that had to be saved in this browser because the Sheet was
+// unreachable, so the next live load uploads it.
+export function markPendingUpload(id, storage = defaultStorage()) {
+  if (!storage) return;
+  const pending = new Set(readPending(storage));
+  pending.add(id);
+  storage.setItem(PENDING_KEY, JSON.stringify([...pending]));
+}
+
+// SP-21: copy plans that exist only in this browser up to the Sheet.
+// First live load: every local-only plan. After that: only plans saved locally
+// while the Sheet was down (PENDING_KEY) — never one deliberately deleted on
+// another device. Local copies are always left in place as a backup. If the
+// Sheet is unreachable this throws without marking anything done, so the next
+// load retries; a plan the Sheet rejects is reported once, not retried forever.
+export async function syncLocalToSheet(remote, storage = defaultStorage()) {
+  if (!storage) return { uploaded: 0, rejected: [] };
+  let local;
+  try {
+    local = loadScenarios(storage);
+  } catch (e) {
+    return { uploaded: 0, rejected: [], error: 'E_SCENARIO_CORRUPT' };
+  }
+  const firstRun = !storage.getItem(MIGRATED_KEY);
+  const pending = new Set(readPending(storage));
+  const wanted = local.filter(s => firstRun || pending.has(s.id));
+  if (!wanted.length) {
+    if (firstRun) storage.setItem(MIGRATED_KEY, new Date().toISOString());
+    return { uploaded: 0, rejected: [] };
+  }
+
+  const remoteIds = new Set((await remote.list()).map(s => s.id));
+  let uploaded = 0;
+  const rejected = [];
+  for (const s of wanted) {
+    if (!remoteIds.has(s.id)) {
+      try {
+        await remote.save(s);
+        uploaded++;
+      } catch (e) {
+        if (e.message !== 'E_SCENARIO_REJECTED') throw e;
+        rejected.push(s.name);
+      }
+    }
+    pending.delete(s.id);
+  }
+  storage.setItem(PENDING_KEY, JSON.stringify([...pending]));
+  storage.setItem(MIGRATED_KEY, new Date().toISOString());
+  return { uploaded, rejected };
+}
+
+// Scenario names now arrive from a shared Sheet, not just this browser, so they
+// are escaped before going anywhere near innerHTML.
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
 const STRATEGY_LABELS = {
   tagTiered: 'Tag-tiered (segment tier order)',
   yieldProtect: 'Yield-protect (lowest yield first)',
@@ -211,6 +289,14 @@ export async function initSellPlanner(ctx) {
   const scenarioList = document.getElementById('sp-scenario-list');
   const exportBtn = document.getElementById('sp-export-csv');
   const saveBtn = document.getElementById('sp-save-scenario');
+  const statusEl = document.getElementById('sp-scenario-status');
+  function setStatus(mode) {
+    if (!statusEl) return;
+    statusEl.textContent =
+      mode === 'sheet' ? 'Saved plans are stored in your Google Sheet (SellPlans tab) and shared across your devices.'
+      : mode === 'local-fallback' ? 'Your Google Sheet is unreachable right now — plans are shown and saved in this browser only.'
+      : 'Offline preview — plans are saved in this browser only.';
+  }
 
   function notice(msg) {
     if (!noticeBox || !noticeList) return;
@@ -244,6 +330,11 @@ export async function initSellPlanner(ctx) {
   // strategy cards to compare no longer discards the user's edits.
   let customPlan = null;
   let customClearedByLock = false;
+  // SP-21: live mode stores plans in the Sheet; offline, or if the Sheet is
+  // unreachable, in this browser.
+  const remoteStore = ctx.scenarioStore || null;
+  const localStore = new LocalScenarioStore();
+  let store = remoteStore || localStore;
   let candidates = [];
 
   function recomputeCandidates() {
@@ -466,23 +557,32 @@ export async function initSellPlanner(ctx) {
     });
   }
 
-  function renderScenarios() {
+  async function renderScenarios() {
     if (!scenarioList) return;
     let scenarios;
     try {
-      scenarios = loadScenarios();
+      scenarios = await store.list();
     } catch (e) {
-      notice('E_SCENARIO_CORRUPT — saved scenarios could not be read; the store was left untouched.');
-      scenarios = [];
+      if (store === remoteStore) {
+        // SP-21: never show an empty list just because the Sheet is down.
+        notice(`${e.message} — your Google Sheet couldn't be reached, so the plans below are the ones saved in this browser.`);
+        store = localStore;
+        setStatus('local-fallback');
+        try { scenarios = await store.list(); } catch (e2) { scenarios = null; }
+      }
+      if (!scenarios) {
+        notice('E_SCENARIO_CORRUPT — saved scenarios could not be read; the store was left untouched.');
+        scenarios = [];
+      }
     }
-    scenarioList.innerHTML = '';
+    scenarioList.innerHTML = scenarios.length ? '' : '<div class="label">No saved plans yet.</div>';
     for (const sc of scenarios) {
       const row = document.createElement('div');
       const { plan, drift } = reviveScenario(sc, candidates, { discount, target: TARGET_NET });
       row.innerHTML = `
-        <span>${sc.name} (saved ${new Date(sc.savedAt).toLocaleDateString()}) — net now ${fmt(plan.totals.net)}${drift !== undefined ? ` (${drift >= 0 ? '+' : ''}${fmt(drift)} vs. save time)` : ''}</span>
-        <button class="btn-toggle sp-load-scenario" data-id="${sc.id}">Load</button>
-        <button class="btn-toggle sp-delete-scenario" data-id="${sc.id}">Delete</button>
+        <span>${esc(sc.name)} (saved ${esc(new Date(sc.savedAt).toLocaleDateString())}) — net now ${fmt(plan.totals.net)}${drift !== undefined ? ` (${drift >= 0 ? '+' : ''}${fmt(drift)} vs. save time)` : ''}</span>
+        <button class="btn-toggle sp-load-scenario" data-id="${esc(sc.id)}">Load</button>
+        <button class="btn-toggle sp-delete-scenario" data-id="${esc(sc.id)}">Delete</button>
       `;
       scenarioList.appendChild(row);
     }
@@ -501,8 +601,15 @@ export async function initSellPlanner(ctx) {
       });
     });
     scenarioList.querySelectorAll('.sp-delete-scenario').forEach(btn => {
-      btn.addEventListener('click', () => {
-        deleteScenario(btn.dataset.id);
+      btn.addEventListener('click', async () => {
+        const sc = scenarios.find(s => s.id === btn.dataset.id);
+        // Deleting from the Sheet removes the plan on every device, so confirm.
+        if (!sc || !confirm(`Delete saved plan "${sc.name}"?`)) return;
+        try {
+          await store.remove(sc.id);
+        } catch (e) {
+          notice(`${e.message} — "${esc(sc.name)}" could not be deleted; nothing was changed.`);
+        }
         renderScenarios();
       });
     });
@@ -519,6 +626,7 @@ export async function initSellPlanner(ctx) {
       renderProgress();
       renderDetail();
     });
+  }
 
   if (divYearsInput) {
     divYearsInput.addEventListener('change', () => {
@@ -532,8 +640,6 @@ export async function initSellPlanner(ctx) {
       renderProgress();
       renderDetail();
     });
-  }
-
   }
 
   if (exportBtn) {
@@ -551,16 +657,36 @@ export async function initSellPlanner(ctx) {
   }
 
   if (saveBtn) {
-    saveBtn.addEventListener('click', () => {
+    saveBtn.addEventListener('click', async () => {
       if (!activePlan) return;
-      const name = prompt('Scenario name?');
+      const raw = prompt('Scenario name? (up to 80 characters)');
+      const name = raw == null ? '' : raw.trim();
       if (!name) return;
-      try {
-        saveScenario(serializeScenario({ name, strategyId: activeStrategyId, locked: [...locked], plan: activePlan }));
-        renderScenarios();
-      } catch (e) {
-        notice(`E_SCENARIO_CORRUPT — could not save: existing scenario store is corrupt.`);
+      if (name.length > 80) {
+        notice('E_SCENARIO_REJECTED — scenario names are limited to 80 characters; nothing was saved.');
+        return;
       }
+      const scenario = serializeScenario({ name, strategyId: activeStrategyId, locked: [...locked], plan: activePlan });
+      try {
+        await store.save(scenario);
+      } catch (e) {
+        if (e.message === 'E_SCENARIO_REJECTED') {
+          notice(`E_SCENARIO_REJECTED — the Sheet refused "${esc(name)}"; nothing was saved.`);
+        } else if (store === remoteStore) {
+          // SP-21: the Sheet is unreachable — keep the plan here rather than lose it,
+          // and queue it so the next live load uploads it.
+          try {
+            await localStore.save(scenario);
+            markPendingUpload(scenario.id);
+            notice(`${e.message} — your Google Sheet couldn't be reached, so "${esc(name)}" was saved in this browser and will be uploaded next time.`);
+          } catch (e2) {
+            notice('E_SCENARIO_CORRUPT — could not save: the scenario store in this browser is corrupt.');
+          }
+        } else {
+          notice('E_SCENARIO_CORRUPT — could not save: the scenario store in this browser is corrupt.');
+        }
+      }
+      renderScenarios();
     });
   }
 
@@ -569,5 +695,17 @@ export async function initSellPlanner(ctx) {
   renderStrip();
   renderProgress();
   renderDetail();
-  renderScenarios();
+  setStatus(remoteStore ? 'sheet' : 'local');
+  if (remoteStore) {
+    // SP-21: copy this browser's local-only plans up, then list from the Sheet.
+    syncLocalToSheet(remoteStore)
+      .then(r => {
+        if (r.uploaded) notice(`Copied ${r.uploaded} plan(s) saved in this browser to your Google Sheet. A copy stays in this browser as a backup.`);
+        if (r.rejected && r.rejected.length) notice(`E_SCENARIO_REJECTED — the Sheet refused: ${r.rejected.map(esc).join(', ')}. They remain saved in this browser.`);
+      })
+      .catch(e => notice(`${e.message} — couldn't copy this browser's saved plans to the Sheet yet; they're safe here and will be retried next time.`))
+      .finally(() => renderScenarios());
+  } else {
+    renderScenarios();
+  }
 }

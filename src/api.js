@@ -72,3 +72,53 @@ export class AppsScriptPriceSource {
     return normalized;
   }
 }
+
+// Rev 4.2 (design.md §C.10, SP-21): Sell Planner scenarios persisted in the
+// owner's Sheet, so a plan saved in one browser shows up on every device.
+// Writes are POSTs with the key in the BODY — never in the URL — and no custom
+// headers, which keeps them CORS "simple requests": Apps Script cannot answer a
+// preflight, so a JSON content-type header would make every save fail.
+export class SheetScenarioStore {
+  constructor(config, fetchImpl = (...args) => fetch(...args)) {
+    this.url = config.WEBAPP_URL;
+    this.key = config.API_KEY;
+    this.fetch = fetchImpl;
+  }
+
+  static _check(data) {
+    if (data && data.error === 'unauthorized') throw new Error('E_AUTH');
+    if (data && data.error === 'bad_request') throw new Error('E_SCENARIO_REJECTED');
+    if (data && data.error) throw new Error('E_SCENARIO_SYNC');
+    return data;
+  }
+
+  async list() {
+    let res;
+    try {
+      res = await this.fetch(`${this.url}?key=${encodeURIComponent(this.key)}&resource=sellplans`);
+    } catch (e) {
+      throw new Error('E_SCENARIO_SYNC');
+    }
+    if (!res.ok) throw new Error('E_SCENARIO_SYNC');
+    const data = SheetScenarioStore._check(await res.json());
+    if (!Array.isArray(data)) throw new Error('E_SCENARIO_SYNC');
+    return data;
+  }
+
+  async _post(payload) {
+    let res;
+    try {
+      res = await this.fetch(this.url, {
+        method: 'POST',
+        body: JSON.stringify({ key: this.key, ...payload })
+      });
+    } catch (e) {
+      throw new Error('E_SCENARIO_SYNC');
+    }
+    if (!res.ok) throw new Error('E_SCENARIO_SYNC');
+    return SheetScenarioStore._check(await res.json());
+  }
+
+  async save(scenario) { return this._post({ action: 'save', scenario }); }
+  async remove(id) { return this._post({ action: 'delete', id }); }
+}

@@ -1,5 +1,20 @@
 # Changelog
 
+## [Rev 4.2] — Saved plans synced to the Google Sheet (2026-09-10)
+
+### Added
+- Saved Sell Planner scenarios live in a `SellPlans` tab of the owner's Sheet, written through a new Apps Script `doPost`, so a plan saved on one device appears on all of them. Offline mode still uses `localStorage`.
+- The first live load copies plans saved only in this browser up to the Sheet, once; local copies stay as a backup. A plan saved while the Sheet is unreachable is kept locally and uploaded on the next load.
+- `gas/deploy.mjs`: automated Apps Script deploy. Backs up the live project, refuses to overwrite code edited online, reuses the live manifest, updates the existing deployment so the URL never changes, verifies end to end, and rolls back automatically on failure.
+
+### Security
+- The backend's first write path, confined by construction to the `SellPlans` tab. Key sent in the POST body rather than the URL; payload validation with size and count bounds; formula-injection guard on written cells; writes serialised with `LockService`; scenario names HTML-escaped in the UI now that they come from a shared source.
+
+### Fixed
+- The dividend-window listener was nested inside the brokerage-discount block, so it depended on that input existing.
+
+Tests: 79 (Vitest), including the Apps Script write path run against in-memory Sheet fakes.
+
 ## [Rev 4.1] — Sell Planner & dividend yield on cost (2026-09-10)
 
 Built under the Universal SDLC (Standard tier); Phase 2 coded by a Sonnet subagent (the Gemini CLI route is

@@ -19,3 +19,6 @@ _tmp*
 # clasp (Apps Script CLI): .clasprc.json holds OAuth tokens, .clasp.json the script id
 .clasp.json
 .clasprc.json
+
+# Rev 4.2 deploy tool: clones of the live Apps Script project (incl. its .clasp.json)
+backups/

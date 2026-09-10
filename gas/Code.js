@@ -33,6 +33,11 @@ function doGet(e) {
         .setMimeType(ContentService.MimeType.JSON);
     }
     
+    // Rev 4.2 (design.md §C.10): saved Sell Planner scenarios, synced across devices.
+    if (resource === 'sellplans') {
+      return jsonOut_(listSellPlans_());
+    }
+
     if (['heldlots', 'trades', 'deposits', 'dividends', 'dailyhistory'].includes(resource)) {
       const data = getSheetData(resource);
       return ContentService.createTextOutput(JSON.stringify(data))
@@ -45,6 +50,156 @@ function doGet(e) {
   } catch (err) {
     return ContentService.createTextOutput(JSON.stringify({ error: "upstream" }))
       .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Rev 4.2 — Sell Planner scenarios synced to the Sheet (design.md §C.10).
+//
+// This is the ONLY write path in the script. It can touch exactly one tab —
+// SELLPLANS_TAB — and nothing else, so the ledger tabs (HeldLots, Trades,
+// Deposits, Dividends, Prices, DailyHistory) stay read-only by construction.
+// The API key now also authorises writes, but only to that one tab (SP-19).
+// ---------------------------------------------------------------------------
+var SELLPLANS_TAB = 'SellPlans';
+var SELLPLANS_HEADER = ['id', 'savedAt', 'name', 'scenario'];
+var SELLPLANS_MAX_SCENARIOS = 200;   // SP-20: bound on stored scenarios
+var SELLPLANS_MAX_BODY = 20000;      // SP-20: bound on one request body, in chars
+var SELLPLANS_STRATEGIES = ['tagTiered', 'yieldProtect', 'proportional', 'cutLosers', 'custom'];
+
+function jsonOut_(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+// Sheets evaluates a cell that starts with = + - @ as a formula, and the scenario
+// name is user-typed. A leading apostrophe forces plain text, which also stops
+// Sheets reinterpreting the ISO timestamp as a date. The JSON column needs no
+// guard: JSON.stringify of an object always starts with "{".
+function safeCell_(v) {
+  return "'" + String(v == null ? '' : v);
+}
+
+// Pure: returns a cleaned copy of the scenario, or null if anything is off.
+// No Sheet access, so test/gas.sellplans.test.js exercises it in a Node sandbox.
+function validateScenario_(s) {
+  if (!s || typeof s !== 'object' || Array.isArray(s)) return null;
+  var isStr = function (v, max) { return typeof v === 'string' && v.length > 0 && v.length <= max; };
+  if (!isStr(s.id, 64) || !/^[A-Za-z0-9_-]+$/.test(s.id)) return null;
+  if (!isStr(s.name, 80)) return null;
+  if (!isStr(s.savedAt, 40) || isNaN(Date.parse(s.savedAt))) return null;
+  if (SELLPLANS_STRATEGIES.indexOf(s.strategyId) === -1) return null;
+
+  var locked = s.locked == null ? [] : s.locked;
+  if (!Array.isArray(locked) || locked.length > 60) return null;
+  for (var k = 0; k < locked.length; k++) if (!isStr(locked[k], 20)) return null;
+
+  if (!Array.isArray(s.rows) || s.rows.length > 60) return null;
+  var rows = [];
+  for (var i = 0; i < s.rows.length; i++) {
+    var r = s.rows[i];
+    if (!r || !isStr(r.ticker, 20)) return null;
+    var n = r.sellShares;
+    if (typeof n !== 'number' || !isFinite(n) || n < 0 || n > 1e8 || Math.floor(n) !== n) return null;
+    rows.push({ ticker: r.ticker, sellShares: n });
+  }
+
+  var note = s.note == null ? '' : s.note;
+  if (typeof note !== 'string' || note.length > 500) return null;
+
+  var out = { id: s.id, name: s.name, savedAt: s.savedAt, strategyId: s.strategyId,
+              locked: locked.slice(), rows: rows, note: note };
+  if (s.netAtSave != null) {
+    if (typeof s.netAtSave !== 'number' || !isFinite(s.netAtSave)) return null;
+    out.netAtSave = s.netAtSave;
+  }
+  return out;
+}
+
+function getSellPlansSheet_(create) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName(SELLPLANS_TAB);
+  if (!sh && create) {
+    sh = ss.insertSheet(SELLPLANS_TAB);
+    sh.getRange(1, 1, 1, SELLPLANS_HEADER.length).setValues([SELLPLANS_HEADER]);
+    sh.setFrozenRows(1);
+  }
+  return sh;
+}
+
+function listSellPlans_() {
+  var sh = getSellPlansSheet_(false);
+  if (!sh || sh.getLastRow() < 2) return [];
+  var values = sh.getRange(2, 1, sh.getLastRow() - 1, SELLPLANS_HEADER.length).getValues();
+  var out = [];
+  for (var i = 0; i < values.length; i++) {
+    // A row someone hand-edited into invalid JSON is skipped, never fatal.
+    try {
+      var s = validateScenario_(JSON.parse(values[i][3]));
+      if (s) out.push(s);
+    } catch (err) { /* skip */ }
+  }
+  return out;
+}
+
+function findSellPlanRow_(sh, id) {
+  if (sh.getLastRow() < 2) return -1;
+  var ids = sh.getRange(2, 1, sh.getLastRow() - 1, 1).getValues();
+  for (var i = 0; i < ids.length; i++) {
+    if (String(ids[i][0]).replace(/^'/, '') === id) return i + 2;
+  }
+  return -1;
+}
+
+// POST body (text/plain JSON): { key, action: 'save' | 'delete', scenario?, id? }.
+// The key travels in the body, not the URL, so it stays out of request logs.
+function doPost(e) {
+  var body;
+  try {
+    var raw = e && e.postData ? e.postData.contents : '';
+    if (!raw || raw.length > SELLPLANS_MAX_BODY) return jsonOut_({ error: 'bad_request' });
+    body = JSON.parse(raw);
+  } catch (err) {
+    return jsonOut_({ error: 'bad_request' });
+  }
+
+  var API_KEY = PropertiesService.getScriptProperties().getProperty('API_KEY');
+  if (!API_KEY || !body || body.key !== API_KEY) return jsonOut_({ error: 'unauthorized' });
+
+  // Two browsers saving at once must not interleave row lookups and writes.
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) return jsonOut_({ error: 'upstream' });
+  try {
+    if (body.action === 'save') {
+      var s = validateScenario_(body.scenario);
+      if (!s) return jsonOut_({ error: 'bad_request' });
+      var sh = getSellPlansSheet_(true);
+      var row = findSellPlanRow_(sh, s.id);
+      var values = [safeCell_(s.id), safeCell_(s.savedAt), safeCell_(s.name), JSON.stringify(s)];
+      if (row === -1) {
+        if (sh.getLastRow() - 1 >= SELLPLANS_MAX_SCENARIOS) return jsonOut_({ error: 'bad_request' });
+        sh.appendRow(values);
+      } else {
+        sh.getRange(row, 1, 1, SELLPLANS_HEADER.length).setValues([values]);
+      }
+      return jsonOut_({ ok: true, id: s.id });
+    }
+
+    if (body.action === 'delete') {
+      if (typeof body.id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(body.id)) {
+        return jsonOut_({ error: 'bad_request' });
+      }
+      var sheet = getSellPlansSheet_(false);
+      var r = sheet ? findSellPlanRow_(sheet, body.id) : -1;
+      if (r !== -1) sheet.deleteRow(r);
+      return jsonOut_({ ok: true, id: body.id, deleted: r !== -1 });
+    }
+
+    return jsonOut_({ error: 'bad_request' });
+  } catch (err) {
+    return jsonOut_({ error: 'upstream' });
+  } finally {
+    lock.releaseLock();
   }
 }
 

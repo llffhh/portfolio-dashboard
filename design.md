@@ -394,6 +394,53 @@ what was actually paid over a chosen past window, and says which window it used.
 
 ---
 
+
+### C.10 Scenarios synced to the Sheet (Rev 4.2, approved 2026-09-10)
+
+Scenarios move from per-browser `localStorage` to a `SellPlans` tab in the owner's Sheet, so a plan saved
+on one device is visible on all of them. This adds the **first write path** to a backend that was
+read-only through Rev 4.1, so its contract is deliberately narrow.
+
+**SP-19 — Write confinement.** `doPost` can write to exactly one tab, `SellPlans` (created on first save,
+header `id | savedAt | name | scenario`). No code path lets a request name a different tab; the ledger
+tabs stay read-only by construction. One row per scenario, upserted by `id`; `scenario` holds the full
+validated JSON and is the authoritative column — the other three are for a human reading the Sheet.
+`GET ?resource=sellplans` returns the parsed list, skipping (never failing on) a row hand-edited into
+invalid JSON. Delete of an unknown id is a harmless no-op. Writes serialise on `LockService`.
+
+**SP-20 — Validation and bounds.** Key compared against the `API_KEY` script property, sent in the **POST
+body, never the URL**. Body ≤ 20,000 chars and valid JSON. `id` matches `[A-Za-z0-9_-]{1,64}`; `name`
+1–80 chars; `savedAt` a parseable date; `strategyId` one of the five plan ids; ≤ 60 `rows`, each an
+integer `sellShares` in [0, 1e8]; ≤ 60 `locked`; `note` ≤ 500. At most 200 stored scenarios (updating an
+existing one is always allowed). Every display cell is written with a leading apostrophe so a name like
+`=IMPORTXML(…)` is stored as text, never evaluated as a formula.
+
+**SP-21 — Client sync.** Live mode (Apps Script source) uses `SheetScenarioStore`; offline mode keeps
+`localStorage`. Writes are `text/plain` POSTs with no custom headers — a CORS "simple request", because
+Apps Script cannot answer a preflight. If the Sheet is unreachable on save, the scenario is kept in this
+browser and the UI says so rather than failing silently. On the first successful live load, scenarios
+that exist only in this browser's `localStorage` are uploaded once (a flag prevents a later re-upload
+from resurrecting a scenario deleted elsewhere); **local copies are left in place as a backup.**
+
+**SP-22 — Deployment invariants** (`gas/deploy.mjs`). (1) The live `/exec` URL never changes: the
+existing deployment id (read from `config.js`) is updated to a new version; a new deployment is never
+created, since a new URL would break every browser holding the old one. (2) Before any push, the live
+project is cloned into `backups/gas-<timestamp>/` with its deployment and version lists. (3) The live
+`Code.js` must equal the last committed `gas/Code.js` (tag `pre-rev4.2-backup`); if it differs, the
+script was edited online and pushing would erase that work — **abort, push nothing**. Time-driven
+triggers run the editor's HEAD code, not the deployed version, which is why this check guards the daily
+snapshot too. (4) The live `appsscript.json` is reused verbatim, so timezone and web-app access settings
+cannot drift. (5) After redeploy the endpoint is verified end to end — ledger reads match the pre-deploy
+baseline, save → list → delete round-trips, a wrong key is refused — and on any failure the deployment
+is automatically re-pointed at the previous version. `config.js` values are read, never printed.
+
+| Code | Trigger |
+|---|---|
+| `E_SCENARIO_SYNC` | The Sheet store is unreachable, returns non-2xx, or reports `upstream`. |
+| `E_SCENARIO_REJECTED` | The server refused the payload as `bad_request` (validation or bound, SP-20). |
+
+---
+
 ## Verified figures (offline, from current ledger)
 | Quantity | Value |
 |---|---|

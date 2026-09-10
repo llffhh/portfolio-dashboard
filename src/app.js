@@ -1,12 +1,12 @@
 import { LocalJsonSource, MockPriceSource } from './data.js?v=32';
-import { AppsScriptSource, AppsScriptPriceSource, normalizeDateKey } from './api.js?v=32';
+import { AppsScriptSource, AppsScriptPriceSource, SheetScenarioStore, normalizeDateKey } from './api.js?v=33';
 import { getConfig, saveConfig } from './settings.js?v=32';
 import {
   currentHoldings, costOfHoldings, investedCapital, currentValue,
   roi, xirr, simpleCagr, dividendsByYear, depositsByYear, yearlyPnL,
   portfolioValueOverTime, buildXirrCashflows, yieldOnCost
 } from './metrics.js?v=33';
-import { initSellPlanner } from './sellplanner-ui.js?v=5';
+import { initSellPlanner } from './sellplanner-ui.js?v=6';
 import { annualDividendFor } from './sellplanner.js?v=3';
 
 // Shares held per ticker as of a date (tolerant app-side variant of MET-9's
@@ -112,7 +112,9 @@ async function init() {
 
     // Rev 4.0 (design.md Section C): sell planner, wired to the same load —
     // offline = using MockPriceSource (buy prices only, C.5 blocking banner).
-    initSellPlanner({ holdings, priceMap, priceToday, divs, reviewLots, offline: priceSource instanceof MockPriceSource })
+    initSellPlanner({ holdings, priceMap, priceToday, divs, reviewLots, offline: priceSource instanceof MockPriceSource,
+      // SP-21: live mode keeps saved plans in the Sheet so they follow you across devices.
+      scenarioStore: cfg ? new SheetScenarioStore(cfg) : null })
       .catch(err => console.error('Sell planner init error', err));
 
     // Filter review lots (null shares) and missing prices
