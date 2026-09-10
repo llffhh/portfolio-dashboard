@@ -4,6 +4,7 @@
 //   node gas/deploy.mjs --script-id <SCRIPT_ID>   back up → safety-check → push → redeploy → verify
 //   node gas/deploy.mjs --backup-only              only snapshot the live project into backups/
 //   node gas/deploy.mjs --rollback <version>       restore the backed-up code and re-point the live URL
+//   … --accept-live <sha256>                       overwrite live code that matches no commit, after review
 //
 // Prerequisite, once per machine: `npx clasp login` (a Google sign-in in your own browser),
 // and "Google Apps Script API" switched on at https://script.google.com/home/usersettings.
@@ -19,7 +20,9 @@
 //  3. The live Code.js must equal gas/Code.js at SOME commit in this repo's history. If it
 //     matches none, it was edited in the online editor and pushing would erase that work,
 //     so the tool aborts. (Time-driven triggers run the editor's code, not the deployed
-//     version, so this also protects the daily snapshot.)
+//     version, so this also protects the daily snapshot.) After a human has reviewed the
+//     difference, --accept-live <sha256> overrides this for exactly that reviewed file;
+//     any later change to the live code changes the hash and re-arms the abort.
 //  4. The live appsscript.json is reused verbatim, so timezone and web-app access
 //     settings cannot drift. Only Code.js is replaced.
 //  5. After redeploying, the endpoint is verified end to end. On any failure the backed-up
@@ -27,6 +30,7 @@
 // config.js values (Web App URL, API key) are read but never printed.
 
 import { execSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -107,7 +111,9 @@ async function verify(cfg, baseline) {
   const problems = [];
   const now = await snapshot(cfg);
   for (const [r, n] of Object.entries(baseline)) {
-    if (now[r] !== n) problems.push(`${r}: ${n} rows before, ${now[r]} after`);
+    // The daily-snapshot trigger may legitimately append one row mid-deploy.
+    const ok = r === 'dailyhistory' ? now[r] === n || now[r] === n + 1 : now[r] === n;
+    if (!ok) problems.push(`${r}: ${n} rows before, ${now[r]} after`);
   }
 
   const list0 = await getJson(cfg, { resource: 'sellplans' });
@@ -183,22 +189,31 @@ function backup(scriptId, cfg) {
   return { dir, stamp, prevVersion };
 }
 
+// The editor names the default file after its UI language (Code.gs, 程式碼.gs, …),
+// so the main file is found by content — the one defining doGet — not by name.
+// Staging then writes the repo code under that SAME live filename; pushing it as a
+// separate Code.js would leave two files defining every function.
 function liveCodeFile(dir) {
   const files = fs.readdirSync(dir).filter((f) => /\.(js|gs)$/.test(f));
-  const code = files.find((f) => /^Code\.(js|gs)$/.test(f));
-  if (!code) die(`The live project has no Code.js (found: ${files.join(', ') || 'none'}). Nothing was pushed.`, 3);
+  const withDoGet = files.filter((f) => /function\s+doGet\s*\(/.test(fs.readFileSync(path.join(dir, f), 'utf8')));
+  if (withDoGet.length !== 1) {
+    die(`Expected exactly one live file defining doGet, found ${withDoGet.length} ` +
+      `(files: ${files.join(', ') || 'none'}). Nothing was pushed.`, 3);
+  }
+  const code = withDoGet[0];
   return { code, others: files.filter((f) => f !== code) };
 }
 
 // Invariant 3: the live code must be a committed version, i.e. nothing was edited online.
+const normCode = (s) => s.replace(/\r\n/g, '\n').replace(/[ \t]+$/gm, '').trim();
+
 function matchCommittedVersion(liveText) {
-  const norm = (s) => s.replace(/\r\n/g, '\n').replace(/[ \t]+$/gm, '').trim();
-  const target = norm(liveText);
+  const target = normCode(liveText);
   const shas = execSync('git log --format=%H -- gas/Code.js', { cwd: ROOT, encoding: 'utf8' })
     .trim().split('\n').filter(Boolean);
   for (const sha of shas) {
     const text = execSync(`git show ${sha}:gas/Code.js`, { cwd: ROOT, encoding: 'utf8', maxBuffer: 16 << 20 });
-    if (norm(text) === target) return sha;
+    if (normCode(text) === target) return sha;
   }
   return null;
 }
@@ -234,10 +249,21 @@ async function main() {
 
   log('2/6 Checking the live code was not edited online…');
   const { code, others } = liveCodeFile(backupDir);
-  const liveSha = matchCommittedVersion(fs.readFileSync(path.join(backupDir, code), 'utf8'));
+  const liveText = fs.readFileSync(path.join(backupDir, code), 'utf8');
+  const liveSha = matchCommittedVersion(liveText);
+  const liveHash = crypto.createHash('sha256').update(normCode(liveText), 'utf8').digest('hex');
   if (!liveSha) {
-    die(`The live ${code} matches no committed version of gas/Code.js — it was edited in the Apps Script ` +
-      `editor, and pushing would erase that work. Nothing was pushed. Its code is in ${rel(backupDir)}/.`, 3);
+    // Invariant 3 escape hatch. A human has diffed exactly this live file against the repo and
+    // confirmed nothing in it needs keeping; the hash pins that review to these exact contents.
+    if (opt('--accept-live') !== liveHash) {
+      die(`The live ${code} matches no committed version of gas/Code.js — it was edited outside this repo, ` +
+        `and pushing would overwrite that. Nothing was pushed; its code is in ${rel(backupDir)}/. ` +
+        `Review the difference, and if nothing in it needs keeping, re-run with --accept-live ${liveHash}`, 3);
+    }
+    fs.writeFileSync(path.join(backupDir, 'ACCEPTED_LIVE_DIFF.txt'),
+      `Live ${code} matched no committed gas/Code.js; overwrite accepted after review.\n` +
+      `sha256 (normalised) ${liveHash}\n${new Date().toISOString()}\n`);
+    log(`    live code matches no commit — overwrite accepted after review (sha256 ${liveHash.slice(0, 12)}…)`);
   }
   for (const f of others) {
     if (/function\s+doPost\s*\(/.test(fs.readFileSync(path.join(backupDir, f), 'utf8'))) {
@@ -245,9 +271,11 @@ async function main() {
     }
   }
   const headSha = execSync('git rev-parse HEAD', { cwd: ROOT, encoding: 'utf8' }).trim();
-  const between = execSync(`git log --oneline ${liveSha}..HEAD -- gas/Code.js`, { cwd: ROOT, encoding: 'utf8' }).trim();
-  log(`    live code = committed version ${liveSha.slice(0, 7)}; this deploy brings in:\n` +
-    (between ? between.split('\n').map((l) => '      ' + l).join('\n') : '      (no changes — already current)'));
+  if (liveSha) {
+    const between = execSync(`git log --oneline ${liveSha}..HEAD -- gas/Code.js`, { cwd: ROOT, encoding: 'utf8' }).trim();
+    log(`    live code = committed version ${liveSha.slice(0, 7)}; this deploy brings in:\n` +
+      (between ? between.split('\n').map((l) => '      ' + l).join('\n') : '      (no changes — already current)'));
+  }
 
   const baseline = await snapshot(cfg);
   if (Object.values(baseline).some((n) => typeof n !== 'number')) {

@@ -434,6 +434,8 @@ cannot drift. (5) After redeploy the endpoint is verified end to end — ledger 
 baseline, save → list → delete round-trips, a wrong key is refused — and on any failure the deployment
 is automatically re-pointed at the previous version. `config.js` values are read, never printed.
 
+**SP-22a — Finding the main file, and the reviewed override.** The editor names the default file after its UI language (`Code.gs`, `程式碼.gs`, …), so the main file is the one that defines `doGet`, and the repo code is staged under that same live filename — never alongside it, which would leave two files defining every function. Invariant (3) is implemented as "equals `gas/Code.js` at *some* commit". When the live file matches none, a human reviews the difference; if nothing in it needs keeping, `--accept-live <sha256>` overrides the check for exactly that reviewed file (hash of its normalised contents), so any later change to the live code re-arms the abort. Verification tolerates one extra `dailyhistory` row, since the daily trigger may fire mid-deploy.
+
 | Code | Trigger |
 |---|---|
 | `E_SCENARIO_SYNC` | The Sheet store is unreachable, returns non-2xx, or reports `upstream`. |
