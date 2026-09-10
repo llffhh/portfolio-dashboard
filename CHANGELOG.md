@@ -15,6 +15,11 @@
 
 Tests: 79 (Vitest), including the Apps Script write path run against in-memory Sheet fakes.
 
+### Deployment (2026-09-10) — Apps Script version 10
+- Deployed with `gas/deploy.mjs`: live URL unchanged, moved from version 4 to version 10. Ledger reads verified unchanged; save, list, delete and wrong-key refusal verified end to end. Rollback: `node gas/deploy.mjs --rollback 4`.
+- The live main file is `程式碼.js` (named by the editor's UI language), and its code matched no committed version: an older state predating the daily-history fixes (`3c2e374`, `d81001b`, `625b09d`). A reviewed diff found no online-only functions or logic, so it was overwritten via `--accept-live`; the old file is kept in the gitignored `backups/`. This deploy therefore also puts those daily-history fixes live: the daily snapshot trigger now records with the corrected logic.
+- Versions 5 to 9 have their own deployments at other URLs. `config.js` does not use them; they were left untouched.
+
 ## [Rev 4.1] — Sell Planner & dividend yield on cost (2026-09-10)
 
 Built under the Universal SDLC (Standard tier); Phase 2 coded by a Sonnet subagent (the Gemini CLI route is
