@@ -15,3 +15,7 @@ data/
 .geminiworkflows/
 gemini_*.log
 _tmp*
+
+# clasp (Apps Script CLI): .clasprc.json holds OAuth tokens, .clasp.json the script id
+.clasp.json
+.clasprc.json
