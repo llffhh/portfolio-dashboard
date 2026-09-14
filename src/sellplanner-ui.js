@@ -88,12 +88,15 @@ export function reviveScenario(scenario, candidates, opts = {}) {
     const sellShares = saved ? Math.min(saved.sellShares, c.shares) : 0;
     const p = proceeds(sellShares, c.price, { discount });
     const costPerShare = c.shares > 0 ? c.cost / c.shares : 0;
+    const realizedPL = sellShares * (c.price - costPerShare);
+    const costBasisSold = sellShares * costPerShare;
     rows.push({
       ticker: c.ticker,
       sellShares,
       sellPct: c.shares > 0 ? sellShares / c.shares : 0,
       gross: p.gross, tax: p.tax, fee: p.fee, net: p.net,
-      realizedPL: sellShares * (c.price - costPerShare)
+      realizedPL,
+      realizedPLPct: costBasisSold > 0 ? (realizedPL / costBasisSold) * 100 : 0
     });
   }
   const totals = rows.reduce((acc, r) => ({
@@ -124,12 +127,15 @@ export function editSellShares(plan, candidates, ticker, newShares, opts = {}) {
   const clamped = Math.max(0, Math.min(Math.round(newShares), candidate.shares));
   const p = proceeds(clamped, candidate.price, { discount });
   const costPerShare = candidate.shares > 0 ? candidate.cost / candidate.shares : 0;
+  const realizedPL = clamped * (candidate.price - costPerShare);
+  const costBasisSold = clamped * costPerShare;
   const newRow = {
     ticker,
     sellShares: clamped,
     sellPct: candidate.shares > 0 ? clamped / candidate.shares : 0,
     gross: p.gross, tax: p.tax, fee: p.fee, net: p.net,
-    realizedPL: clamped * (candidate.price - costPerShare)
+    realizedPL,
+    realizedPLPct: costBasisSold > 0 ? (realizedPL / costBasisSold) * 100 : 0
   };
 
   const rows = plan.rows.map(r => (r.ticker === ticker ? newRow : r));
@@ -163,6 +169,9 @@ export function buildCsv(plan, candidates) {
 }
 
 export function buildSummaryText(plan, summary) {
+  const realizedPLPctStr = summary.realizedPLPct !== undefined
+    ? ` (${summary.realizedPLPct >= 0 ? '+' : ''}${summary.realizedPLPct.toFixed(1)}%)`
+    : '';
   const lines = [
     `Strategy: ${plan.strategyId}`,
     `Target net: ${TARGET_NET.toLocaleString()}`,
@@ -171,7 +180,7 @@ export function buildSummaryText(plan, summary) {
     plan.feasible ? null : `Shortfall: ${Math.round(plan.shortfall).toLocaleString()}`,
     plan.spilledIntoTier ? `Spilled into tier ${plan.spilledIntoTier}` : null,
     `Positions touched: ${summary.positionsTouched} (liquidated: ${summary.positionsLiquidated})`,
-    `Realized P/L: ${Math.round(summary.realizedPL).toLocaleString()}`,
+    `Realized P/L: ${Math.round(summary.realizedPL).toLocaleString()}${realizedPLPctStr}`,
     `Annual dividend given up (approximate): ${Math.round(summary.annualDividendGivenUp).toLocaleString()}`,
     `Tax + fees: ${Math.round(summary.taxAndFees).toLocaleString()}`,
     `Remaining value: ${Math.round(summary.remaining.value).toLocaleString()}`,
@@ -412,7 +421,7 @@ export async function initSellPlanner(ctx) {
         <div class="label">${plan.feasible ? 'reaches target' : `short by ${fmt(plan.shortfall)}`}${plan.spilledIntoTier ? ` — reaches into Tier ${plan.spilledIntoTier}` : ''}</div>
         <table style="margin-top:12px;box-shadow:none;font-size:12px;">
           <tbody>
-            <tr><td style="padding:4px 0;border:none;">Realized P/L</td><td style="padding:4px 0;border:none;">${s.realizedPL >= 0 ? '+' : ''}${fmt(s.realizedPL)}</td></tr>
+            <tr><td style="padding:4px 0;border:none;">Realized P/L</td><td style="padding:4px 0;border:none;">${s.realizedPL >= 0 ? '+' : ''}${fmt(s.realizedPL)} (${s.realizedPLPct >= 0 ? '+' : ''}${s.realizedPLPct.toFixed(1)}%)</td></tr>
             <tr><td style="padding:4px 0;border:none;">Dividend/yr given up</td><td style="padding:4px 0;border:none;">−${fmt(s.annualDividendGivenUp)}</td></tr>
             <tr><td style="padding:4px 0;border:none;">Tier 1 share of sale</td><td style="padding:4px 0;border:none;">${s.tier1ValueSoldPct.toFixed(0)}%</td></tr>
             <tr><td style="padding:4px 0;border:none;">Positions sold</td><td style="padding:4px 0;border:none;">${s.positionsLiquidated} of ${s.positionsTouched}</td></tr>
@@ -498,7 +507,7 @@ export async function initSellPlanner(ctx) {
       </div>
       <div class="label">${fmt(activePlan.totals.net)} / ${fmt(TARGET_NET)} net raised (${pct.toFixed(1)}%)</div>
       <div class="grid" style="margin-top:16px;">
-        <div><div class="label">Realized P/L on this plan</div><div class="value" style="font-size:18px;">${sum.realizedPL >= 0 ? '+' : ''}${fmt(sum.realizedPL)}</div></div>
+        <div><div class="label">Realized P/L on this plan</div><div class="value" style="font-size:18px;">${sum.realizedPL >= 0 ? '+' : ''}${fmt(sum.realizedPL)} (${sum.realizedPLPct >= 0 ? '+' : ''}${sum.realizedPLPct.toFixed(1)}%)</div></div>
         <div><div class="label">Annual dividend given up (approx.)</div><div class="value" style="font-size:18px;">−${fmt(sum.annualDividendGivenUp)}</div></div>
         <div><div class="label">Tax + fees</div><div class="value" style="font-size:18px;">${fmt(sum.taxAndFees)}</div></div>
         <div><div class="label">Gross to sell</div><div class="value" style="font-size:18px;">${fmt(activePlan.totals.gross)}</div></div>
@@ -525,6 +534,7 @@ export async function initSellPlanner(ctx) {
         <td><input type="number" class="sp-sell-shares" data-ticker="${c.ticker}" min="0" max="${c.shares}" value="${row.sellShares}"></td>
         <td>${fmt(row.net)}</td>
         <td>${row.realizedPL >= 0 ? '+' : ''}${fmt(row.realizedPL)}</td>
+        <td>${row.realizedPLPct >= 0 ? '+' : ''}${row.realizedPLPct.toFixed(1)}%</td>
         <td>${c.yieldPct.toFixed(2)}% (approx.)</td>
       `;
       tbody.appendChild(tr);

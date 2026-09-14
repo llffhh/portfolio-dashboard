@@ -105,6 +105,7 @@ export function proceeds(shares, price, opts = {}) {
 function makeRow(candidate, sellShares, p) {
   const costPerShare = candidate.shares > 0 ? candidate.cost / candidate.shares : 0;
   const realizedPL = sellShares * (candidate.price - costPerShare);
+  const costBasisSold = sellShares * costPerShare;
   return {
     ticker: candidate.ticker,
     sellShares,
@@ -113,7 +114,8 @@ function makeRow(candidate, sellShares, p) {
     tax: p.tax,
     fee: p.fee,
     net: p.net,
-    realizedPL
+    realizedPL,
+    realizedPLPct: costBasisSold > 0 ? (realizedPL / costBasisSold) * 100 : 0
   };
 }
 
@@ -286,7 +288,7 @@ export function summarize(plan, candidates) {
 
   let positionsTouched = 0, positionsLiquidated = 0, realizedPL = 0, annualDividendGivenUp = 0;
   let taxAndFees = 0;
-  let soldValueTotal = 0, soldValueTier1 = 0;
+  let soldValueTotal = 0, soldValueTier1 = 0, costBasisSold = 0;
   let remainingValue = 0, remainingAnnualDiv = 0, remainingTier1Value = 0;
 
   for (const row of plan.rows) {
@@ -301,6 +303,7 @@ export function summarize(plan, candidates) {
     taxAndFees += row.tax + row.fee;
     soldValueTotal += row.gross;
     if (c.tier === 1) soldValueTier1 += row.gross;
+    costBasisSold += c.shares > 0 ? row.sellShares * (c.cost / c.shares) : 0;
 
     const remainingShares = c.shares - row.sellShares;
     const remVal = remainingShares * c.price;
@@ -313,6 +316,7 @@ export function summarize(plan, candidates) {
     positionsTouched,
     positionsLiquidated,
     realizedPL,
+    realizedPLPct: costBasisSold > 0 ? (realizedPL / costBasisSold) * 100 : 0,
     annualDividendGivenUp,
     tier1ValueSoldPct: soldValueTotal > 0 ? (soldValueTier1 / soldValueTotal) * 100 : 0,
     taxAndFees,
