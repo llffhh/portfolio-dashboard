@@ -7,7 +7,7 @@ import {
   buildCandidates, proceeds, solveFill, summarize,
   tagTiered, yieldProtect, proportional, cutLosers,
   TARGET_NET
-} from './sellplanner.js?v=3';
+} from './sellplanner.js?v=4';
 
 export const SCENARIO_KEY = 'sellPlanner.scenarios.v1';
 export const SCENARIO_VERSION = 1;

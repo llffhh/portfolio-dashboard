@@ -1,3 +1,22 @@
+// Apps Script web apps on a personal account throttle/queue simultaneous
+// requests from the same caller, occasionally returning a non-2xx response
+// that has nothing to do with the API key. Retry transient failures with
+// backoff before giving up — a real "unauthorized" response never gets here
+// because it's ok:true with a JSON error body, so it's never retried.
+async function fetchWithRetry(url, attempts = 3, baseDelayMs = 600) {
+  let res;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      res = await fetch(url);
+      if (res.ok) return res;
+    } catch (e) {
+      res = null;
+    }
+    if (i < attempts - 1) await new Promise(r => setTimeout(r, baseDelayMs * (i + 1)));
+  }
+  return res || { ok: false };
+}
+
 export class AppsScriptSource {
   constructor(config) {
     this.url = config.WEBAPP_URL;
@@ -5,7 +24,7 @@ export class AppsScriptSource {
   }
 
   async _fetch(resource) {
-    const res = await fetch(`${this.url}?key=${encodeURIComponent(this.key)}&resource=${resource}`);
+    const res = await fetchWithRetry(`${this.url}?key=${encodeURIComponent(this.key)}&resource=${resource}`);
     if (!res.ok) throw new Error('E_AUTH');
     const data = await res.json();
     if (data.error) {
@@ -56,7 +75,7 @@ export class AppsScriptPriceSource {
     let url = `${this.url}?key=${encodeURIComponent(this.key)}&resource=prices&tickers=${encodeURIComponent(tickers.join(','))}`;
     if (dates.length > 0) url += `&dates=${dates.join(',')}`;
 
-    const res = await fetch(url);
+    const res = await fetchWithRetry(url);
     if (!res.ok) throw new Error('E_AUTH');
     const data = await res.json();
 

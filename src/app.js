@@ -1,13 +1,13 @@
 import { LocalJsonSource, MockPriceSource } from './data.js?v=32';
-import { AppsScriptSource, AppsScriptPriceSource, SheetScenarioStore, normalizeDateKey } from './api.js?v=33';
+import { AppsScriptSource, AppsScriptPriceSource, SheetScenarioStore, normalizeDateKey } from './api.js?v=34';
 import { getConfig, saveConfig } from './settings.js?v=32';
 import {
   currentHoldings, costOfHoldings, investedCapital, currentValue,
   roi, xirr, simpleCagr, dividendsByYear, depositsByYear, yearlyPnL,
   portfolioValueOverTime, buildXirrCashflows, yieldOnCost
 } from './metrics.js?v=33';
-import { initSellPlanner } from './sellplanner-ui.js?v=6';
-import { annualDividendFor } from './sellplanner.js?v=3';
+import { initSellPlanner } from './sellplanner-ui.js?v=7';
+import { annualDividendFor } from './sellplanner.js?v=4';
 
 // Shares held per ticker as of a date (tolerant app-side variant of MET-9's
 // reconstruction — missing prices are skipped and surfaced, not thrown).
@@ -68,12 +68,14 @@ async function init() {
   }
 
   try {
-    const [lots, trades, deposits, divs] = await Promise.all([
-      dataSource.loadHeldLots(),
-      dataSource.loadTrades(),
-      dataSource.loadDeposits(),
-      dataSource.loadDividends()
-    ]);
+    // Sequential, not Promise.all: firing all four at once against the same
+    // Apps Script web app trips its per-user concurrency limit and comes back
+    // as a spurious E_AUTH (the label api.js gives any failed request, not
+    // just a real auth rejection).
+    const lots = await dataSource.loadHeldLots();
+    const trades = await dataSource.loadTrades();
+    const deposits = await dataSource.loadDeposits();
+    const divs = await dataSource.loadDividends();
 
     let dailyHistory = [];
     try {
