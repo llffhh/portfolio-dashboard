@@ -334,6 +334,123 @@ export function summarize(plan, candidates) {
   };
 }
 
+// SP-25 (design.md §C.12): what the ledger says was ACTUALLY sold — as opposed
+// to everything else in this module, which is prospective (what a plan *would*
+// raise at today's prices).
+//
+// Net proceeds are not modelled here and `proceeds()` is deliberately not used:
+// a sell trade's `amount` is the real bank credit, already net of tax and fee.
+//
+// Cost of the sold lots is derived, not matched lot-by-lot:
+//
+//     soldCost(ticker) = Σ buy.amount − Σ heldLot.cost
+//
+// i.e. every dollar ever spent on the ticker, less what the ledger says the
+// shares still held are carried at. Whatever remains was spent on shares that
+// are gone — which is the cost of the sales, by definition.
+//
+// Crucially this handles a PART-sold lot, which neither FIFO nor "sum the buy
+// rows not marked 尚未交易=Y" gets right. When part of a lot is sold the original
+// buy row is left whole and a remainder row is added carrying the held portion's
+// cost (賣掉部分股數成本 / 目前投資金額). So for a lot bought at C of which the
+// remainder row records R as still held, the sale cost C−R — which is what this
+// subtraction gives, whereas summing un-flagged buy rows would charge the whole
+// of C to a half-sold lot. A lot walk is doubly unsafe here because the Trades
+// sheet does not reconcile with HeldLots (see the note above the reconstruction
+// in gas/Code.js).
+//
+// Zero-cost 配股 lots subtract nothing and so pass through harmlessly, and a
+// null-share held lot still carries cost, so every lot is subtracted regardless
+// of whether its share count is usable.
+export function realizedSales(trades, heldLots) {
+  const sellsBy = {}, buyAmountBy = {}, buySharesBy = {},
+        heldCostBy = {}, heldSharesBy = {}, hasLotBy = {};
+
+  for (const lot of heldLots || []) {
+    if (!lot || typeof lot.ticker !== 'string') continue;
+    const t = lot.ticker.trim();
+    heldCostBy[t] = (heldCostBy[t] || 0) + (lot.cost || 0);
+    heldSharesBy[t] = (heldSharesBy[t] || 0) + (lot.shares || 0);
+    hasLotBy[t] = true;
+  }
+  for (const tr of trades || []) {
+    if (!tr || typeof tr.ticker !== 'string') continue;
+    const t = tr.ticker.trim();
+    if (tr.type === 'buy') {
+      buyAmountBy[t] = (buyAmountBy[t] || 0) + (tr.amount || 0);
+      buySharesBy[t] = (buySharesBy[t] || 0) + (tr.shares || 0);
+    } else if (tr.type === 'sell') {
+      (sellsBy[t] = sellsBy[t] || []).push(tr);
+    }
+  }
+
+  const sales = [], byTicker = [], unreconciled = [];
+  let totalProceeds = 0, totalCost = 0;
+
+  for (const ticker of Object.keys(sellsBy).sort()) {
+    const sells = sellsBy[ticker];
+    const netProceeds = sells.reduce((s, t) => s + (t.amount || 0), 0);
+    const cost = (buyAmountBy[ticker] || 0) - (heldCostBy[ticker] || 0);
+    const realizedPL = netProceeds - cost;
+    const sharesSold = sells.reduce((s, t) => s + (t.shares || 0), 0);
+
+    // Shares in the sold lots can differ from shares sold — a 配股 stock dividend
+    // adds shares with no buy row behind them, and a part-lot sell leaves the rest
+    // of its lot held. The cash figures stay exact either way (money out vs money
+    // in); only the per-share split below becomes an approximation.
+    const sharesGone = (buySharesBy[ticker] || 0) - (heldSharesBy[ticker] || 0);
+    const sharesReconcile = Math.abs(sharesGone - sharesSold) < 0.5;
+    if (!sharesReconcile) unreconciled.push(ticker);
+
+    const costPerShare = sharesSold > 0 ? cost / sharesSold : null;
+    for (const s of sells) {
+      const shares = s.shares ?? null;
+      const saleCost = (shares !== null && costPerShare !== null) ? shares * costPerShare : null;
+      const salePL = saleCost === null ? null : (s.amount || 0) - saleCost;
+      sales.push({
+        date: s.date,
+        ticker,
+        shares,
+        netProceeds: s.amount || 0,
+        cost: saleCost,
+        realizedPL: salePL,
+        realizedPLPct: (salePL !== null && saleCost > 0) ? (salePL / saleCost) * 100 : null,
+        allocated: !sharesReconcile
+      });
+    }
+
+    byTicker.push({
+      ticker,
+      shares: sharesSold,
+      netProceeds,
+      cost,
+      realizedPL,
+      realizedPLPct: cost > 0 ? (realizedPL / cost) * 100 : null,
+      lastDate: sells.reduce((d, s) => (s.date > d ? s.date : d), sells[0].date),
+      fullyExited: !hasLotBy[ticker],
+      sharesReconcile
+    });
+
+    totalProceeds += netProceeds;
+    totalCost += cost;
+  }
+
+  sales.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : a.ticker.localeCompare(b.ticker)));
+
+  const totalPL = totalProceeds - totalCost;
+  return {
+    sales,
+    byTicker,
+    totals: {
+      netProceeds: totalProceeds,
+      cost: totalCost,
+      realizedPL: totalPL,
+      realizedPLPct: totalCost > 0 ? (totalPL / totalCost) * 100 : null
+    },
+    notices: { unreconciled }
+  };
+}
+
 // SP-6: four peer strategies — pure comparators, ties break on higher value
 // then ticker so output is deterministic. None forecasts price or return;
 // none is presented as "recommended" (that's a UI-layer rule too).

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   buildCandidates, proceeds, annualDividendFor, solveFill, summarize,
-  tagTiered, yieldProtect, proportional, cutLosers, TARGET_NET
+  tagTiered, yieldProtect, proportional, cutLosers, TARGET_NET, realizedSales
 } from '../src/sellplanner.js';
 import {
   loadScenarios, saveScenario, deleteScenario, serializeScenario, reviveScenario,
@@ -551,3 +551,171 @@ describe('SP-18 — the dividend window is a parameter, not a constant', () => {
     expect(Number.isFinite(annualDividendFor('陽明', dividends, asOf, 'x'))).toBe(true);
   });
 });
+
+describe('SP-25 realizedSales (design.md §C.12)', () => {
+  it('a clean round trip: net proceeds are the sell amount, cost the buy amount, P/L the difference', () => {
+    const trades = [
+      { date: '2020-01-10', type: 'buy', ticker: 'A', shares: 1000, amount: 80000 },
+      { date: '2021-03-05', type: 'sell', ticker: 'A', shares: 1000, amount: 100000 }
+    ];
+    const { byTicker, totals } = realizedSales(trades, []);
+
+    expect(byTicker).toHaveLength(1);
+    expect(byTicker[0]).toMatchObject({
+      ticker: 'A', shares: 1000, netProceeds: 100000, cost: 80000,
+      realizedPL: 20000, fullyExited: true, sharesReconcile: true
+    });
+    expect(byTicker[0].realizedPLPct).toBeCloseTo(25, 6);
+    expect(totals.realizedPL).toBe(20000);
+  });
+
+  it('a partially-held ticker charges only the sold lots — the held lot\'s cost is excluded', () => {
+    // Two 1,000-share buys, one sold and one still held. The held lot's cost is
+    // the same ledger cell as its buy amount, so it cancels exactly.
+    const trades = [
+      { date: '2020-01-10', type: 'buy', ticker: 'A', shares: 1000, amount: 80000 },
+      { date: '2020-06-10', type: 'buy', ticker: 'A', shares: 1000, amount: 90000 },
+      { date: '2021-03-05', type: 'sell', ticker: 'A', shares: 1000, amount: 100000 }
+    ];
+    const heldLots = [{ date: '2020-06-10', ticker: 'A', shares: 1000, buyPrice: 90, cost: 90000 }];
+    const { byTicker } = realizedSales(trades, heldLots);
+
+    expect(byTicker[0].cost).toBe(80000);
+    expect(byTicker[0].realizedPL).toBe(20000);
+    expect(byTicker[0].fullyExited).toBe(false);
+  });
+
+  it('a PART-sold lot charges only the portion sold, per the ledger\'s remainder row', () => {
+    // One 300-share buy, of which 150 shares were sold and 150 kept. The buy row
+    // is left whole and the kept portion's cost goes on a separate remainder row,
+    // so the sale cost 30,000−16,000. Summing "buy rows not marked held" would
+    // wrongly charge the whole 30,000 to a half-sold lot.
+    const trades = [
+      { date: '2023-07-10', type: 'buy', ticker: 'A', shares: 300, amount: 30000 },
+      { date: '2025-04-18', type: 'sell', ticker: 'A', shares: 150, amount: 20000 }
+    ];
+    const heldLots = [{ date: '2025-04-18', ticker: 'A', shares: 150, buyPrice: 106.67, cost: 16000 }];
+    const { byTicker } = realizedSales(trades, heldLots);
+
+    expect(byTicker[0].cost).toBe(14000);
+    expect(byTicker[0].realizedPL).toBe(6000);
+    expect(byTicker[0].sharesReconcile).toBe(true);
+  });
+
+  it('a zero-cost 配股 lot subtracts nothing but still counts its shares', () => {
+    const trades = [
+      { date: '2021-03-15', type: 'buy', ticker: 'A', shares: 500, amount: 10000 },
+      { date: '2024-01-05', type: 'sell', ticker: 'A', shares: 510, amount: 12000 }
+    ];
+    // 10 shares arrived as a stock dividend — real shares, no cash behind them.
+    const heldLots = [{ date: '2022-01-28', ticker: 'A', shares: 10, buyPrice: 0, cost: 0 }];
+    const { byTicker } = realizedSales(trades, heldLots);
+
+    expect(byTicker[0].cost).toBe(10000);
+    expect(byTicker[0].realizedPL).toBe(2000);
+  });
+
+  it('a null-share held lot still cancels its cost (it is held, merely unusable for share maths)', () => {
+    const trades = [
+      { date: '2020-01-10', type: 'buy', ticker: 'A', shares: 1000, amount: 80000 },
+      { date: '2020-06-10', type: 'buy', ticker: 'A', shares: null, amount: 90000 },
+      { date: '2021-03-05', type: 'sell', ticker: 'A', shares: 1000, amount: 100000 }
+    ];
+    const heldLots = [{ date: '2020-06-10', ticker: 'A', shares: null, buyPrice: null, cost: 90000 }];
+    expect(realizedSales(trades, heldLots).byTicker[0].cost).toBe(80000);
+  });
+
+  it('share counts that do not reconcile (e.g. a 配股 stock dividend) keep exact cash figures but flag the per-share split', () => {
+    // 1,000 shares bought, 1,200 sold — the extra 200 came from a stock dividend
+    // with no buy row behind it. Money in and money out are still exact.
+    const trades = [
+      { date: '2020-01-10', type: 'buy', ticker: 'A', shares: 1000, amount: 80000 },
+      { date: '2021-03-05', type: 'sell', ticker: 'A', shares: 1200, amount: 100000 }
+    ];
+    const { byTicker, sales, notices } = realizedSales(trades, []);
+
+    expect(byTicker[0].netProceeds).toBe(100000);
+    expect(byTicker[0].cost).toBe(80000);
+    expect(byTicker[0].realizedPL).toBe(20000);
+    expect(byTicker[0].sharesReconcile).toBe(false);
+    expect(notices.unreconciled).toEqual(['A']);
+    expect(sales[0].allocated).toBe(true);
+  });
+
+  it('per-sale cost is allocated at the average cost of the shares sold, and sums back to the ticker total', () => {
+    const trades = [
+      { date: '2020-01-10', type: 'buy', ticker: 'A', shares: 2000, amount: 160000 },
+      { date: '2021-03-05', type: 'sell', ticker: 'A', shares: 500, amount: 60000 },
+      { date: '2021-09-05', type: 'sell', ticker: 'A', shares: 1500, amount: 150000 }
+    ];
+    const { sales, byTicker } = realizedSales(trades, []);
+
+    expect(sales).toHaveLength(2);
+    expect(sales.map(s => s.date)).toEqual(['2021-09-05', '2021-03-05']); // newest first
+    const sum = sales.reduce((s, r) => s + r.cost, 0);
+    expect(sum).toBeCloseTo(byTicker[0].cost, 6);
+    expect(sales.reduce((s, r) => s + r.realizedPL, 0)).toBeCloseTo(byTicker[0].realizedPL, 6);
+  });
+
+  it('a non-positive cost basis yields a null percentage rather than Infinity or NaN', () => {
+    // Everything bought is still held, yet a sell exists — the derived sold cost
+    // is 0, so there is no denominator to divide by.
+    const trades = [
+      { date: '2020-01-10', type: 'buy', ticker: 'A', shares: 1000, amount: 80000 },
+      { date: '2021-03-05', type: 'sell', ticker: 'A', shares: 500, amount: 60000 }
+    ];
+    const heldLots = [{ date: '2020-01-10', ticker: 'A', shares: 1000, buyPrice: 80, cost: 80000 }];
+    const { byTicker, sales, totals } = realizedSales(trades, heldLots);
+
+    expect(byTicker[0].cost).toBe(0);
+    expect(byTicker[0].realizedPLPct).toBeNull();
+    expect(sales[0].realizedPLPct).toBeNull();
+    expect(Number.isFinite(totals.realizedPL)).toBe(true);
+  });
+
+  it('a sell with no share count still reports its proceeds, with no allocated P/L', () => {
+    const trades = [
+      { date: '2020-01-10', type: 'buy', ticker: 'A', shares: 1000, amount: 80000 },
+      { date: '2021-03-05', type: 'sell', ticker: 'A', shares: null, amount: 100000 }
+    ];
+    const { sales, byTicker } = realizedSales(trades, []);
+
+    expect(sales[0].netProceeds).toBe(100000);
+    expect(sales[0].realizedPL).toBeNull();
+    expect(sales[0].realizedPLPct).toBeNull();
+    expect(byTicker[0].realizedPL).toBe(20000); // the ticker-level cash figure is unaffected
+  });
+
+  it('a ticker that was never sold never appears, and ticker whitespace is normalised', () => {
+    const trades = [
+      { date: '2020-01-10', type: 'buy', ticker: '台積電', shares: 1000, amount: 80000 },
+      { date: '2020-01-10', type: 'buy', ticker: '鴻海 ', shares: 1000, amount: 50000 },
+      { date: '2021-03-05', type: 'sell', ticker: '鴻海', shares: 1000, amount: 60000 }
+    ];
+    const { byTicker } = realizedSales(trades, []);
+
+    expect(byTicker.map(t => t.ticker)).toEqual(['鴻海']);
+    expect(byTicker[0].cost).toBe(50000); // the trailing-space buy row matched
+  });
+
+  it('totals are the sum of the per-ticker figures', () => {
+    const trades = [
+      { date: '2020-01-10', type: 'buy', ticker: 'A', shares: 1000, amount: 80000 },
+      { date: '2021-03-05', type: 'sell', ticker: 'A', shares: 1000, amount: 100000 },
+      { date: '2020-02-10', type: 'buy', ticker: 'B', shares: 1000, amount: 50000 },
+      { date: '2021-04-05', type: 'sell', ticker: 'B', shares: 1000, amount: 30000 }
+    ];
+    const { byTicker, totals } = realizedSales(trades, []);
+
+    expect(totals.netProceeds).toBe(byTicker.reduce((s, t) => s + t.netProceeds, 0));
+    expect(totals.cost).toBe(byTicker.reduce((s, t) => s + t.cost, 0));
+    expect(totals.realizedPL).toBe(0); // +20,000 and −20,000
+  });
+
+  it('empty or missing input is not an error', () => {
+    expect(realizedSales([], []).sales).toEqual([]);
+    expect(realizedSales(undefined, undefined).totals.realizedPL).toBe(0);
+    expect(realizedSales(undefined, undefined).totals.realizedPLPct).toBeNull();
+  });
+});
+

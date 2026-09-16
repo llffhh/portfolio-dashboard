@@ -6,8 +6,8 @@
 import {
   buildCandidates, proceeds, solveFill, summarize,
   tagTiered, yieldProtect, proportional, cutLosers,
-  TARGET_NET
-} from './sellplanner.js?v=5';
+  TARGET_NET, realizedSales
+} from './sellplanner.js?v=6';
 
 export const SCENARIO_KEY = 'sellPlanner.scenarios.v1';
 export const SCENARIO_VERSION = 1;
@@ -367,6 +367,11 @@ export async function initSellPlanner(ctx) {
     noticeList.innerHTML += `<li>${msg}</li>`;
   }
 
+  // SP-25 (design.md §C.12): realized sales are settled ledger history — they
+  // need no live price, so they render above the C.5 offline block rather than
+  // behind it. What was sold is a fact whether or not the market is reachable.
+  renderRealized();
+
   // C.5: offline block — a plausible-looking wrong plan is worse than none.
   if (ctx.offline) {
     if (offlineBanner) {
@@ -704,6 +709,83 @@ export async function initSellPlanner(ctx) {
         renderScenarios();
       });
     });
+  }
+
+  // SP-25 (design.md §C.12): realized sales — actual executed trades from the
+  // ledger. Independent of every planning control on this tab.
+  function renderRealized() {
+    const summaryEl = document.getElementById('sp-realized-summary');
+    const realizedBody = document.querySelector('#sp-realized-table tbody');
+    const footnoteEl = document.getElementById('sp-realized-footnote');
+    const groupBtn = document.getElementById('sp-realized-group');
+    if (!realizedBody) return;
+
+    const r = realizedSales(ctx.trades, ctx.lots);
+    let grouped = false;
+
+    const pct = (v) => v === null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
+    const signed = (v) => v === null ? '—' : `${v >= 0 ? '+' : ''}${fmt(v)}`;
+
+    if (summaryEl) {
+      summaryEl.innerHTML = `
+        <div class="card"><div class="label">Total net proceeds</div><div class="value">${fmt(r.totals.netProceeds)}</div></div>
+        <div class="card"><div class="label">Cost of shares sold</div><div class="value">${fmt(r.totals.cost)}</div></div>
+        <div class="card"><div class="label">Realized P/L</div><div class="value">${signed(r.totals.realizedPL)}</div></div>
+        <div class="card"><div class="label">Realized P/L %</div><div class="value">${pct(r.totals.realizedPLPct)}</div></div>
+      `;
+    }
+
+    if (footnoteEl) {
+      const n = r.notices.unreconciled.length;
+      footnoteEl.textContent = n
+        ? `${r.sales.length} sales across ${r.byTicker.length} tickers. The cash figures above are exact. `
+          + `For ${n} ticker(s) the share counts do not reconcile — usually 配股 shares that arrived with no purchase behind them — `
+          + `so their per-sale split is an average and is marked ≈: ${r.notices.unreconciled.join(', ')}.`
+        : `${r.sales.length} sales across ${r.byTicker.length} tickers.`;
+    }
+
+    function draw() {
+      realizedBody.innerHTML = '';
+      if (!r.sales.length) {
+        realizedBody.innerHTML = '<tr><td colspan="6" class="label">No sales recorded in the ledger yet.</td></tr>';
+        return;
+      }
+      const rows = grouped
+        ? [...r.byTicker].sort((a, b) => b.netProceeds - a.netProceeds).map(t => ({
+            date: t.lastDate, ticker: t.ticker, shares: t.shares,
+            netProceeds: t.netProceeds, realizedPL: t.realizedPL, realizedPLPct: t.realizedPLPct,
+            approx: false, tag: t.fullyExited ? '全部賣出' : '部分賣出'
+          }))
+        : r.sales.map(s => ({
+            date: s.date, ticker: s.ticker, shares: s.shares,
+            netProceeds: s.netProceeds, realizedPL: s.realizedPL, realizedPLPct: s.realizedPLPct,
+            approx: s.allocated, tag: null
+          }));
+
+      for (const row of rows) {
+        const tr = document.createElement('tr');
+        const mark = row.approx ? ' <span class="label">≈</span>' : '';
+        const tag = row.tag ? ` <span class="label">${row.tag}</span>` : '';
+        tr.innerHTML = `
+          <td>${esc(row.date)}</td>
+          <td>${esc(row.ticker)}${tag}</td>
+          <td>${row.shares === null ? '—' : row.shares.toLocaleString()}</td>
+          <td>${fmt(row.netProceeds)}</td>
+          <td>${signed(row.realizedPL)}${mark}</td>
+          <td>${pct(row.realizedPLPct)}</td>
+        `;
+        realizedBody.appendChild(tr);
+      }
+    }
+
+    if (groupBtn) {
+      groupBtn.addEventListener('click', () => {
+        grouped = !grouped;
+        groupBtn.textContent = grouped ? 'Show every sale' : 'Group by ticker';
+        draw();
+      });
+    }
+    draw();
   }
 
   if (discountInput) {

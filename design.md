@@ -475,6 +475,69 @@ candidate-absent row as sold.
 
 ---
 
+### C.12 Realized sales — what was actually sold (amendment, 2026-09-16)
+
+Everything else in Section C is **prospective**: what a plan *would* raise if it were executed at
+today's prices. §C.11 added a 已賣出 row type, but those are save-time *plan estimates* carried inside
+a reloaded scenario, not executed trades. Nothing on the tab reported what the ledger says was really
+sold, for how much, at what gain.
+
+**SP-25 — `realizedSales(trades, heldLots)`** (pure, in `sellplanner.js`) reports executed sales:
+per sale, per ticker, and in total.
+
+*Net proceeds are not modelled.* `proceeds()` is deliberately unused here — a sell Trade's `amount`
+is the actual cash credited to the account (`存入`), already net of transaction tax and brokerage
+fee. Modelling a fee on top of a figure that already had one deducted would double-count it.
+
+*Cost of the sold shares is derived, not lot-matched:*
+
+```
+soldCost(ticker) = Σ trades[buy].amount − Σ heldLots.cost
+```
+
+Every dollar ever spent on the ticker, less what the ledger carries the still-held shares at. What
+remains was spent on shares that are gone — the cost of the sales, by definition. Three properties
+make this the right rule rather than a convenience:
+
+1. **It gets part-sold lots right, and the obvious alternatives do not.** When part of a lot is sold
+   the original buy row is left whole and a *remainder* row is added carrying the held portion's cost
+   (`賣掉部分股數成本` / `目前投資金額`, §A.1). For a lot bought at `C` whose remainder row records
+   `R` as still held, the sale cost `C − R`. Summing "buy rows not marked `尚未交易=Y`" would instead
+   charge the whole of `C` against a half-sold lot, overstating cost and understating the gain.
+2. **It needs no lot walk.** FIFO is unsafe here regardless: the Trades sheet does not reconcile with
+   HeldLots (see the note above the backwards reconstruction in `gas/Code.js`), so a forward lot walk
+   mis-assigns cost by the size of that gap.
+3. **Zero-cost 配股 lots pass through harmlessly** (they subtract nothing while still contributing
+   shares), and a null-share held lot still carries cost, so every lot is subtracted regardless of
+   whether its share count is usable.
+
+**Share counts may not reconcile, and the panel says so.** `Σ buy.shares − Σ heldLot.shares` can
+differ from `Σ sell.shares` — a 配股 stock dividend adds shares with no purchase behind them. The
+**cash figures stay exact** either way (money out vs money in); only the *per-sale* split, which
+allocates the ticker's sold cost at its average cost per share sold, becomes an approximation. Those
+tickers are flagged (`sharesReconcile: false`, per-sale `allocated: true`), marked `≈` in the table,
+and named in the panel's footnote. Per-ticker and total figures are never approximate.
+
+**Non-positive denominators yield `null`, never `Infinity`/`NaN`** — a ticker whose every purchase is
+still held has a derived sold cost of 0, so there is no percentage to report; it renders as `—`.
+
+**UI.** A 已賣出部位 card on `#sellplanner-panel` (`index.html`), rendered by `renderRealized()` in
+`sellplanner-ui.js`: a totals strip, a Date/Ticker/Shares/Net Proceeds/Realized P/L/Realized P/L %
+table defaulting to one row per sale newest-first, and a toggle to roll up per ticker (tagged
+全部賣出 / 部分賣出). Two placement rules follow from it being *history*, not a plan:
+
+- It is rendered **once at init**, never from a plan re-render. No strategy, discount, lock or
+  dividend-window change can alter what was already sold.
+- It renders **above the C.5 offline block**, not behind it. C.5 suppresses the planner offline
+  because a plan priced off purchase prices would be plausible and wrong; realized sales need no
+  live price at all, so withholding settled history when the market is unreachable would be a
+  pointless loss of information.
+
+`initSellPlanner`'s ctx gains `trades` and `lots` (`src/app.js`), both already loaded for the
+dashboard. No Sheet schema change, no `gas/Code.js` change, no redeploy.
+
+---
+
 ## Verified figures (offline, from current ledger)
 | Quantity | Value |
 |---|---|

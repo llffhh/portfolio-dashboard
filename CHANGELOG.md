@@ -1,5 +1,21 @@
 # Changelog
 
+## [Rev 4.4] — Realized sales on the 賣股規劃 tab (2026-09-16)
+
+See design.md §C.12.
+
+### Added
+- A **已賣出部位 — Realized sales** panel on the Sell Planner tab, reporting what the ledger says was *actually* sold, as opposed to what a plan would raise: **Net Proceeds, Realized P/L and Realized P/L %**, per sale and per ticker, with a totals strip. Defaults to one row per sale, newest first; a toggle rolls the view up per ticker (tagged 全部賣出 / 部分賣出).
+- `realizedSales(trades, heldLots)` in `sellplanner.js` — pure, no I/O, no price input. Net proceeds come straight from the sell trade's `amount` (the real cash credited, already net of tax and fee), so `proceeds()` is deliberately not applied on top. Cost of the shares sold is derived as `Σ buy.amount − Σ heldLot.cost`, which — unlike FIFO or "sum the un-flagged buy rows" — charges a part-sold lot only for the portion that actually left.
+- `initSellPlanner`'s ctx now carries `trades` and `lots`, both already loaded for the dashboard.
+
+### Notes
+- Where a ticker's share counts don't reconcile (a 配股 stock dividend adds shares with no purchase behind them), the cash figures stay exact and only the per-sale split is an average — those rows are marked `≈` and the tickers are named in the panel footnote. Per-ticker and total figures are never approximate.
+- The panel renders above the C.5 offline block: realized sales are settled history and need no live price, so they stay visible when the market is unreachable.
+- A ticker whose every purchase is still held has a derived sold cost of 0; its percentage renders as `—` rather than `Infinity`.
+
+Tests: 95 (Vitest), up from 83. No Sheet schema change and no Apps Script redeploy — `gas/Code.js` is untouched.
+
 ## [Rev 4.3] — Sold positions stay visible in a loaded plan (2026-09-16)
 
 Amendment to design.md §C.10 (SP-11); see §C.11 for the full rationale.
