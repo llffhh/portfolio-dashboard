@@ -148,7 +148,10 @@ describe('SP-19/SP-20 — Apps Script SellPlans write path (gas/Code.js)', () =>
       // validated too, not just passed through.
       scenario({ rows: [{ ticker: '甲', sellShares: 1, price: -1 }] }),
       scenario({ rows: [{ ticker: '甲', sellShares: 1, sellPct: 1.5 }] }),
-      scenario({ rows: [{ ticker: '甲', sellShares: 1, realizedPLPct: 'lots' }] })
+      scenario({ rows: [{ ticker: '甲', sellShares: 1, realizedPLPct: 'lots' }] }),
+      scenario({ rows: [{ ticker: '甲', sellShares: 1, sellPrice: -5 }] }),
+      scenario({ rows: [{ ticker: '甲', sellShares: 1, holdShares: 'many' }] }),
+      scenario({ rows: [{ ticker: '甲', sellShares: 1, cost: -1 }] })
     ];
     for (const s of bad) expect(g.post({ key: 'K', action: 'save', scenario: s })).toEqual({ error: 'bad_request' });
     expect(g.post({ key: 'K', action: 'delete', id: '../HeldLots' })).toEqual({ error: 'bad_request' });
@@ -160,6 +163,12 @@ describe('SP-19/SP-20 — Apps Script SellPlans write path (gas/Code.js)', () =>
     expect(g.post({ key: 'K', action: 'save', scenario: scenario({ rows }) })).toEqual({ ok: true, id: 'sc_1' });
     const list = g.get({ key: 'K', resource: 'sellplans' });
     expect(list[0].rows).toEqual(rows);
+  });
+
+  it('SP-27 (design.md §C.14): a row\'s save-day snapshot survives the round trip through the Sheet', () => {
+    const rows = [{ ticker: '甲', sellShares: 20, sellPrice: 723.5, holdShares: 100, cost: 60000 }];
+    expect(g.post({ key: 'K', action: 'save', scenario: scenario({ rows }) })).toEqual({ ok: true, id: 'sc_1' });
+    expect(g.get({ key: 'K', resource: 'sellplans' })[0].rows).toEqual(rows);
   });
 
   it('SP-19: the write path can only ever touch the SellPlans tab', () => {

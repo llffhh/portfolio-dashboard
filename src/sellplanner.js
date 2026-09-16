@@ -282,6 +282,38 @@ export function solveFill(candidates, target, opts = {}) {
   };
 }
 
+// SP-27 (design.md §C.14): a saved plan's row valued exactly as it stood on the
+// day it was saved — the price then, and the position it was selling from —
+// never re-priced. Realized P/L is on gross, like makeRow(). A row saved before
+// holdShares/cost existed falls back to whatever P/L it carried.
+export function snapshotRow(saved, opts = {}) {
+  const discount = opts.discount ?? 1.0;
+  const sellShares = saved.sellShares;
+  const sellPrice = saved.sellPrice ?? saved.price ?? null;
+  const hold = saved.holdShares ?? null;
+  const cost = saved.cost ?? null;
+  if (sellPrice == null) {
+    return {
+      ticker: saved.ticker, sellShares, sellPct: null,
+      gross: 0, tax: 0, fee: 0, net: 0, realizedPL: null, realizedPLPct: null,
+      price: null, holdShares: hold, cost, frozen: true, priceMissing: true
+    };
+  }
+  const p = proceeds(sellShares, sellPrice, { discount });
+  let realizedPL = saved.realizedPL ?? null;
+  let realizedPLPct = saved.realizedPLPct ?? null;
+  if (hold > 0 && cost != null) {
+    const basis = (sellShares * cost) / hold;
+    realizedPL = p.gross - basis;
+    realizedPLPct = basis > 0 ? (realizedPL / basis) * 100 : null;
+  }
+  return {
+    ticker: saved.ticker, sellShares, sellPct: hold > 0 ? sellShares / hold : null,
+    gross: p.gross, tax: p.tax, fee: p.fee, net: p.net, realizedPL, realizedPLPct,
+    price: sellPrice, holdShares: hold, cost, frozen: true
+  };
+}
+
 // SP-5: plan-level summary + remaining-portfolio figures.
 export function summarize(plan, candidates) {
   const byTicker = Object.fromEntries((candidates || []).map(c => [c.ticker, c]));
@@ -292,25 +324,22 @@ export function summarize(plan, candidates) {
   let remainingValue = 0, remainingAnnualDiv = 0, remainingTier1Value = 0;
 
   for (const row of plan.rows) {
-    // A sold row (design.md §C.11/§C.13) never takes part in the remaining-
-    // portfolio figures, even when its ticker is still held: a loaded plan also
-    // carries a live row for that ticker, and that row accounts for what's left.
+    // A frozen (§C.14 save-day snapshot) or sold (§C.11) row describes a past
+    // position, so it never feeds the remaining-portfolio figures, which are
+    // about today's holdings. Everything derivable from the row alone still counts.
     const live = byTicker[row.ticker];
-    const c = row.sold ? undefined : live;
+    const c = row.sold || row.frozen ? undefined : live;
 
-    // A row can outlive its candidate — a scenario reloaded after the position
-    // was actually sold (see sellplanner-ui.js reviveScenario) carries its
-    // save-time figures with no live candidate to match. Everything derivable
-    // from the row alone still counts; only the remaining-portfolio figures,
-    // which need a live position, are skipped for it.
     if (row.sellShares > 0) {
       positionsTouched++;
       if (row.sellPct === 1) positionsLiquidated++;
     }
-    realizedPL += row.realizedPL;
     taxAndFees += row.tax + row.fee;
     soldValueTotal += row.gross;
-    costBasisSold += row.gross - row.realizedPL;
+    if (row.realizedPL != null) {
+      realizedPL += row.realizedPL;
+      costBasisSold += row.gross - row.realizedPL;
+    }
     if (live && live.tier === 1) soldValueTier1 += row.gross;
     if (!c) continue;
 
@@ -335,123 +364,6 @@ export function summarize(plan, candidates) {
       yieldPct: remainingValue > 0 ? (remainingAnnualDiv / remainingValue) * 100 : 0,
       tier1WeightPct: remainingValue > 0 ? (remainingTier1Value / remainingValue) * 100 : 0
     }
-  };
-}
-
-// SP-25 (design.md §C.12): what the ledger says was ACTUALLY sold — as opposed
-// to everything else in this module, which is prospective (what a plan *would*
-// raise at today's prices).
-//
-// Net proceeds are not modelled here and `proceeds()` is deliberately not used:
-// a sell trade's `amount` is the real bank credit, already net of tax and fee.
-//
-// Cost of the sold lots is derived, not matched lot-by-lot:
-//
-//     soldCost(ticker) = Σ buy.amount − Σ heldLot.cost
-//
-// i.e. every dollar ever spent on the ticker, less what the ledger says the
-// shares still held are carried at. Whatever remains was spent on shares that
-// are gone — which is the cost of the sales, by definition.
-//
-// Crucially this handles a PART-sold lot, which neither FIFO nor "sum the buy
-// rows not marked 尚未交易=Y" gets right. When part of a lot is sold the original
-// buy row is left whole and a remainder row is added carrying the held portion's
-// cost (賣掉部分股數成本 / 目前投資金額). So for a lot bought at C of which the
-// remainder row records R as still held, the sale cost C−R — which is what this
-// subtraction gives, whereas summing un-flagged buy rows would charge the whole
-// of C to a half-sold lot. A lot walk is doubly unsafe here because the Trades
-// sheet does not reconcile with HeldLots (see the note above the reconstruction
-// in gas/Code.js).
-//
-// Zero-cost 配股 lots subtract nothing and so pass through harmlessly, and a
-// null-share held lot still carries cost, so every lot is subtracted regardless
-// of whether its share count is usable.
-export function realizedSales(trades, heldLots) {
-  const sellsBy = {}, buyAmountBy = {}, buySharesBy = {},
-        heldCostBy = {}, heldSharesBy = {}, hasLotBy = {};
-
-  for (const lot of heldLots || []) {
-    if (!lot || typeof lot.ticker !== 'string') continue;
-    const t = lot.ticker.trim();
-    heldCostBy[t] = (heldCostBy[t] || 0) + (lot.cost || 0);
-    heldSharesBy[t] = (heldSharesBy[t] || 0) + (lot.shares || 0);
-    hasLotBy[t] = true;
-  }
-  for (const tr of trades || []) {
-    if (!tr || typeof tr.ticker !== 'string') continue;
-    const t = tr.ticker.trim();
-    if (tr.type === 'buy') {
-      buyAmountBy[t] = (buyAmountBy[t] || 0) + (tr.amount || 0);
-      buySharesBy[t] = (buySharesBy[t] || 0) + (tr.shares || 0);
-    } else if (tr.type === 'sell') {
-      (sellsBy[t] = sellsBy[t] || []).push(tr);
-    }
-  }
-
-  const sales = [], byTicker = [], unreconciled = [];
-  let totalProceeds = 0, totalCost = 0;
-
-  for (const ticker of Object.keys(sellsBy).sort()) {
-    const sells = sellsBy[ticker];
-    const netProceeds = sells.reduce((s, t) => s + (t.amount || 0), 0);
-    const cost = (buyAmountBy[ticker] || 0) - (heldCostBy[ticker] || 0);
-    const realizedPL = netProceeds - cost;
-    const sharesSold = sells.reduce((s, t) => s + (t.shares || 0), 0);
-
-    // Shares in the sold lots can differ from shares sold — a 配股 stock dividend
-    // adds shares with no buy row behind them, and a part-lot sell leaves the rest
-    // of its lot held. The cash figures stay exact either way (money out vs money
-    // in); only the per-share split below becomes an approximation.
-    const sharesGone = (buySharesBy[ticker] || 0) - (heldSharesBy[ticker] || 0);
-    const sharesReconcile = Math.abs(sharesGone - sharesSold) < 0.5;
-    if (!sharesReconcile) unreconciled.push(ticker);
-
-    const costPerShare = sharesSold > 0 ? cost / sharesSold : null;
-    for (const s of sells) {
-      const shares = s.shares ?? null;
-      const saleCost = (shares !== null && costPerShare !== null) ? shares * costPerShare : null;
-      const salePL = saleCost === null ? null : (s.amount || 0) - saleCost;
-      sales.push({
-        date: s.date,
-        ticker,
-        shares,
-        netProceeds: s.amount || 0,
-        cost: saleCost,
-        realizedPL: salePL,
-        realizedPLPct: (salePL !== null && saleCost > 0) ? (salePL / saleCost) * 100 : null,
-        allocated: !sharesReconcile
-      });
-    }
-
-    byTicker.push({
-      ticker,
-      shares: sharesSold,
-      netProceeds,
-      cost,
-      realizedPL,
-      realizedPLPct: cost > 0 ? (realizedPL / cost) * 100 : null,
-      lastDate: sells.reduce((d, s) => (s.date > d ? s.date : d), sells[0].date),
-      fullyExited: !hasLotBy[ticker],
-      sharesReconcile
-    });
-
-    totalProceeds += netProceeds;
-    totalCost += cost;
-  }
-
-  sales.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : a.ticker.localeCompare(b.ticker)));
-
-  const totalPL = totalProceeds - totalCost;
-  return {
-    sales,
-    byTicker,
-    totals: {
-      netProceeds: totalProceeds,
-      cost: totalCost,
-      realizedPL: totalPL,
-      realizedPLPct: totalCost > 0 ? (totalPL / totalCost) * 100 : null
-    },
-    notices: { unreconciled }
   };
 }
 

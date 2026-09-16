@@ -1,11 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import {
   buildCandidates, proceeds, annualDividendFor, solveFill, summarize,
-  tagTiered, yieldProtect, proportional, cutLosers, TARGET_NET, realizedSales
+  tagTiered, yieldProtect, proportional, cutLosers, TARGET_NET, snapshotRow
 } from '../src/sellplanner.js';
 import {
   loadScenarios, saveScenario, deleteScenario, serializeScenario, reviveScenario,
-  buildCsv, buildSummaryText, SCENARIO_KEY, attributeSales, editSellShares
+  buildCsv, buildSummaryText, SCENARIO_KEY, editSellShares, isSnapshotScenario, taipeiDay
 } from '../src/sellplanner-ui.js';
 import realSegmentMap from '../src/segments.json';
 
@@ -323,18 +323,18 @@ describe('Rev 4.0 Sell Planner acceptance tests (design.md Section C)', () => {
         ],
         totals: { gross: 30000, tax: 90, fee: 42.75, net: 29867.25, realizedPL: 1000 }
       };
-      const scenario = serializeScenario({ name: 'Test plan', strategyId: 'tagTiered', locked: [], plan, note: 'unit test' });
+      const candidates = [makeCandidate({ ticker: 'A', shares: 1000, price: 100, cost: 70000 }), makeCandidate({ ticker: 'B' })];
+      const scenario = serializeScenario({ name: 'Test plan', strategyId: 'tagTiered', locked: [], plan, note: 'unit test', candidates });
       saveScenario(scenario, storage);
 
       const loaded = loadScenarios(storage);
       expect(loaded).toHaveLength(1);
-      // SP-11 amendment (design.md §C.11): a saved row now also carries price
-      // (derived from gross/sellShares) and its dollar figures, not just the
-      // share count — needed so a since-sold position can still be shown at
-      // its save-time price/history instead of vanishing on reload.
+      // SP-27 (design.md §C.14): each row is a save-day snapshot — the price the
+      // planner used and the position it sold from — so a reload is never re-priced.
       expect(loaded[0].rows).toEqual([
-        { ticker: 'A', sellShares: 300, sellPct: 0.3, price: 100, gross: 30000, tax: 90, fee: 42.75, net: 29867.25, realizedPL: 1000, realizedPLPct: 1000 / 29000 * 100 }
+        { ticker: 'A', sellShares: 300, sellPrice: 100, holdShares: 1000, cost: 70000 }
       ]);
+      expect(loaded[0].netAtSave).toBeCloseTo(29867.25, 6);
       expect(loaded[0].name).toBe('Test plan');
 
       // Corrupt the store directly and confirm it is left untouched.
@@ -382,43 +382,29 @@ describe('Rev 4.0 Sell Planner acceptance tests (design.md Section C)', () => {
       expect(plan.rows[0].sellShares).toBe(100); // clamped to shares held
     });
 
-    it('reviveScenario amendment (design.md §C.11): a since-sold ticker (absent from heldTickers) is listed frozen at its save-time price, not dropped', () => {
+    it('reviveScenario (§C.11, plan with no snapshot): a ticker no longer held is listed as sold with nothing recorded, not dropped', () => {
       const candidates = [makeCandidate({ ticker: 'A', shares: 1000, price: 120, cost: 80000, tier: 1 })];
       const scenario = {
         id: 'sc3', name: 'Two-name plan', savedAt: new Date().toISOString(), strategyId: 'custom', locked: [],
-        rows: [
-          { ticker: 'A', sellShares: 400 },
-          { ticker: 'B', sellShares: 200, sellPct: 1, price: 80, gross: 16000, tax: 48, fee: 22.8, net: 15929.2, realizedPL: 6000, realizedPLPct: 60 }
-        ],
+        rows: [{ ticker: 'A', sellShares: 400 }, { ticker: 'B', sellShares: 200 }],
         note: ''
       };
-      // B is not in `candidates` (no longer a live position) and not in
-      // heldTickers either (actually sold, unlike a merely-locked position).
-      const heldTickers = new Set(['A']);
-      const { plan } = reviveScenario(scenario, candidates, { discount: 1.0, heldTickers });
+      const { plan } = reviveScenario(scenario, candidates, { discount: 1.0, heldTickers: new Set(['A']) });
 
-      expect(plan.rows).toHaveLength(2);
-      const rowA = plan.rows.find(r => r.ticker === 'A');
-      const rowB = plan.rows.find(r => r.ticker === 'B');
-      expect(rowA.sold).toBe(false);
-      expect(rowB).toMatchObject({ sold: true, price: 80, sellShares: 200, net: 15929.2, realizedPL: 6000, realizedPLPct: 60 });
-      // The sold row's net still counts toward the plan's totals — the record
-      // must not understate what this plan actually raised.
-      expect(plan.totals.net).toBeCloseTo(rowA.net + 15929.2, 6);
+      expect(plan.snapshot).toBeUndefined();
+      expect(plan.rows.find(r => r.ticker === 'A')).toMatchObject({ sold: false, sellShares: 400 });
+      expect(plan.rows.find(r => r.ticker === 'B')).toMatchObject({ sold: true, priceMissing: true, sellShares: 200, net: 0 });
     });
 
-    it('reviveScenario does not treat a merely-locked (still-held) ticker as sold', () => {
+    it('reviveScenario (§C.11, plan with no snapshot) does not treat a merely-locked (still-held) ticker as sold', () => {
       const candidates = [makeCandidate({ ticker: 'A', shares: 1000, price: 120, cost: 80000, tier: 1 })];
-      // B is held (in heldTickers) but excluded from `candidates` right now —
-      // e.g. locked, or briefly missing a price — which is not the same as sold.
-      const heldTickers = new Set(['A', 'B']);
       const scenario = {
         id: 'sc4', name: 'Locked plan', savedAt: new Date().toISOString(), strategyId: 'custom', locked: ['B'],
-        rows: [{ ticker: 'A', sellShares: 100 }, { ticker: 'B', sellShares: 50, price: 10, gross: 500, tax: 1.5, fee: 20, net: 478.5, realizedPL: 100, realizedPLPct: 25 }],
+        rows: [{ ticker: 'A', sellShares: 100 }, { ticker: 'B', sellShares: 50 }],
         note: ''
       };
-      const { plan } = reviveScenario(scenario, candidates, { discount: 1.0, heldTickers });
-      expect(plan.rows.map(r => r.ticker)).toEqual(['A']); // B dropped, not shown as a sold row
+      const { plan } = reviveScenario(scenario, candidates, { discount: 1.0, heldTickers: new Set(['A', 'B']) });
+      expect(plan.rows.map(r => r.ticker)).toEqual(['A']);
     });
 
     it('summarize (design.md §C.11 amendment) still folds a row with no matching candidate into realizedPL/net-raised totals, but not remaining-portfolio figures', () => {
@@ -552,291 +538,88 @@ describe('SP-18 — the dividend window is a parameter, not a constant', () => {
   });
 });
 
-describe('SP-26 a loaded scenario shows what actually happened (design.md §C.13)', () => {
-  // Saved on 2026-09-10 in Taiwan (13:36 UTC = 21:36 Taipei).
-  const SAVED = '2026-09-10T13:36:30.000Z';
-  const sale = (o) => ({ shares: 1000, netProceeds: 50000, cost: 40000, realizedPL: 10000, realizedPLPct: 25, allocated: false, ...o });
-  const scenario = (rows) => ({ id: 'sc', name: 'p', savedAt: SAVED, strategyId: 'custom', locked: [], rows, note: '' });
 
-  it('attributeSales: only sales on or after the save day count, oldest first, capped at the planned shares', () => {
-    const sales = [
-      sale({ date: '2026-09-09', ticker: 'A', shares: 100, netProceeds: 1, cost: 1 }),   // before save — ignored
-      sale({ date: '2026-09-15', ticker: 'A', shares: 200, netProceeds: 400, cost: 200 }), // later plan's sale
-      sale({ date: '2026-09-10', ticker: 'A', shares: 25, netProceeds: 50, cost: 20 })     // this plan's sale
-    ];
-    const a = attributeSales(scenario([{ ticker: 'A', sellShares: 25 }]), sales);
-    expect(a.A).toMatchObject({ shares: 25, net: 50, cost: 20, realizedPL: 30, lastDate: '2026-09-10' });
-    expect(a.A.realizedPLPct).toBeCloseTo(150, 6);
+describe('SP-27 a saved plan is valued at its save-day snapshot (design.md §C.14)', () => {
+  const SAVED = '2026-09-15T05:43:21.752Z';
+  const plan = (rows) => ({ id: 'sc', name: '9/15 plan', savedAt: SAVED, strategyId: 'custom', locked: [], rows, note: '', netAtSave: 1 });
+
+  it('snapshotRow: net at the saved price; realized P/L and % against the cost per share held then', () => {
+    const r = snapshotRow({ ticker: 'A', sellShares: 20, sellPrice: 723, holdShares: 100, cost: 60000 });
+    const p = proceeds(20, 723, { discount: 1.0 });
+    expect(r).toMatchObject({ frozen: true, price: 723, holdShares: 100, sellPct: 0.2 });
+    expect(r.net).toBeCloseTo(p.net, 6);
+    expect(r.realizedPL).toBeCloseTo(20 * 723 - 20 * 600, 6);
+    expect(r.realizedPLPct).toBeCloseTo((20 * 723 - 12000) / 12000 * 100, 6);
   });
 
-  it('attributeSales: a sale only partly needed is prorated by shares', () => {
-    const sales = [sale({ date: '2026-09-11', ticker: 'A', shares: 250, netProceeds: 500, cost: 250 })];
-    const a = attributeSales(scenario([{ ticker: 'A', sellShares: 100 }]), sales);
-    expect(a.A.shares).toBe(100);
-    expect(a.A.net).toBeCloseTo(200, 6);
-    expect(a.A.cost).toBeCloseTo(100, 6);
+  it('snapshotRow: the brokerage discount applies to the fee', () => {
+    const full = snapshotRow({ ticker: 'A', sellShares: 10000, sellPrice: 1000, holdShares: 10000, cost: 1 });
+    const half = snapshotRow({ ticker: 'A', sellShares: 10000, sellPrice: 1000, holdShares: 10000, cost: 1 }, { discount: 0.5 });
+    expect(half.net).toBeGreaterThan(full.net);
   });
 
-  it('attributeSales: the save day is the Taiwan calendar day, not the UTC one', () => {
-    // 2026-09-09T20:00Z is already 2026-09-10 04:00 in Taipei.
-    const sc = { ...scenario([{ ticker: 'A', sellShares: 100 }]), savedAt: '2026-09-09T20:00:00.000Z' };
-    const sales = [sale({ date: '2026-09-09', ticker: 'A', shares: 100 })];
-    expect(attributeSales(sc, sales)).toEqual({});
+  it('snapshotRow: nothing held or no cost gives no percentage, never Infinity', () => {
+    const r = snapshotRow({ ticker: 'A', sellShares: 20, sellPrice: 10, holdShares: 0, cost: 0 });
+    expect(r.realizedPL).toBeNull();
+    expect(r.realizedPLPct).toBeNull();
+    const zeroCost = snapshotRow({ ticker: 'A', sellShares: 20, sellPrice: 10, holdShares: 100, cost: 0 });
+    expect(zeroCost.realizedPL).toBeCloseTo(200, 6);
+    expect(zeroCost.realizedPLPct).toBeNull();
   });
 
-  it('attributeSales: an unparseable savedAt matches nothing rather than everything', () => {
-    const sc = { ...scenario([{ ticker: 'A', sellShares: 100 }]), savedAt: 'not a date' };
-    expect(attributeSales(sc, [sale({ date: '2020-01-01', ticker: 'A' })])).toEqual({});
+  it('snapshotRow: a row without a saved price counts as 0 and says so', () => {
+    expect(snapshotRow({ ticker: 'A', sellShares: 20, holdShares: 100, cost: 600 })).toMatchObject({ priceMissing: true, net: 0, realizedPL: null });
   });
 
-  it('a fully executed position that is no longer held shows its real figures and counts toward the total', () => {
-    const candidates = [makeCandidate({ ticker: 'A', shares: 1000, price: 120, cost: 80000 })];
-    const sales = [sale({ date: '2026-09-11', ticker: 'B', shares: 500, netProceeds: 30000, cost: 20000, realizedPL: 10000 })];
-    const { plan } = reviveScenario(scenario([{ ticker: 'B', sellShares: 500 }]), candidates, { heldTickers: new Set(['A']), sales });
-
-    const b = plan.rows.filter(r => r.ticker === 'B');
-    expect(b).toHaveLength(1);
-    expect(b[0]).toMatchObject({ sold: true, actual: true, sellShares: 500, net: 30000, realizedPL: 10000, soldDate: '2026-09-11' });
-    expect(b[0].realizedPLPct).toBeCloseTo(50, 6);
-    expect(plan.totals.net).toBeCloseTo(30000, 6);
+  it('snapshotRow: an older row with a price but no holdings keeps the P/L it was saved with', () => {
+    const r = snapshotRow({ ticker: 'A', sellShares: 200, price: 80, realizedPL: 6000, realizedPLPct: 60 });
+    expect(r).toMatchObject({ price: 80, realizedPL: 6000, realizedPLPct: 60 });
   });
 
-  it('a fully executed position that is still held (other lots remain) is a sold row, and nothing more is planned for it', () => {
-    const candidates = [makeCandidate({ ticker: 'A', shares: 2000, price: 120, cost: 160000 })];
-    const sales = [sale({ date: '2026-09-11', ticker: 'A', shares: 1000 })];
-    const { plan } = reviveScenario(scenario([{ ticker: 'A', sellShares: 1000 }]), candidates, { sales });
+  it('reviveScenario: a snapshot plan shows only its own rows, frozen — no re-pricing, no zero rows for other holdings', () => {
+    const candidates = [makeCandidate({ ticker: 'A', shares: 5000, price: 999, cost: 1 }), makeCandidate({ ticker: 'Z', shares: 100, price: 50 })];
+    const { plan: p } = reviveScenario(plan([
+      { ticker: 'A', sellShares: 1000, sellPrice: 42.5, holdShares: 1000, cost: 30000 },
+      { ticker: 'GONE', sellShares: 25, sellPrice: 4000, holdShares: 25, cost: 50000 }
+    ]), candidates, { discount: 1.0, heldTickers: new Set(['A', 'Z']) });
 
-    const rows = plan.rows.filter(r => r.ticker === 'A');
-    expect(rows.find(r => r.sold)).toMatchObject({ sellShares: 1000, net: 50000 });
-    expect(rows.find(r => !r.sold).sellShares).toBe(0);
-    expect(plan.totals.net).toBeCloseTo(50000, 6);
+    expect(p.snapshot).toBe(true);
+    expect(p.savedDay).toBe('2026-09-15');
+    expect(p.rows.map(r => r.ticker)).toEqual(['A', 'GONE']);
+    expect(p.rows.every(r => r.frozen)).toBe(true);
+    expect(p.rows[0].price).toBe(42.5); // not today's 999
+    expect(p.totals.net).toBeCloseTo(proceeds(1000, 42.5).net + proceeds(25, 4000).net, 6);
   });
 
-  it('a partly executed position splits: a sold row for what sold, a live row for the rest at today\'s price', () => {
-    const candidates = [makeCandidate({ ticker: 'A', shares: 5000, price: 20, cost: 80000 })];
-    const sales = [sale({ date: '2026-09-11', ticker: 'A', shares: 1000, netProceeds: 29000 })];
-    const { plan } = reviveScenario(scenario([{ ticker: 'A', sellShares: 1400 }]), candidates, { discount: 1.0, sales });
-
-    const sold = plan.rows.find(r => r.ticker === 'A' && r.sold);
-    const live = plan.rows.find(r => r.ticker === 'A' && !r.sold);
-    expect(sold.sellShares).toBe(1000);
-    expect(live.sellShares).toBe(400);
-    expect(live.net).toBeCloseTo(proceeds(400, 20, { discount: 1.0 }).net, 6);
-    expect(plan.totals.net).toBeCloseTo(29000 + live.net, 6);
+  it('isSnapshotScenario / taipeiDay', () => {
+    expect(isSnapshotScenario(plan([{ ticker: 'A', sellShares: 1 }]))).toBe(false);
+    expect(isSnapshotScenario(plan([{ ticker: 'A', sellShares: 1, sellPrice: 5 }]))).toBe(true);
+    expect(taipeiDay('2026-09-09T20:00:00.000Z')).toBe('2026-09-10');
+    expect(taipeiDay('nonsense')).toBeNull();
   });
 
-  it('an unexecuted position is unchanged — re-priced at today\'s market as before', () => {
-    const candidates = [makeCandidate({ ticker: 'A', shares: 1000, price: 100, cost: 50000 })];
-    const { plan } = reviveScenario(scenario([{ ticker: 'A', sellShares: 300 }]), candidates, { sales: [] });
-    expect(plan.rows).toHaveLength(1);
-    expect(plan.rows[0]).toMatchObject({ sold: false, sellShares: 300 });
+  it('summarize: frozen rows count toward net, P/L and fees, but not the figures about today\'s holdings', () => {
+    const candidates = [makeCandidate({ ticker: 'A', shares: 4000, price: 20, cost: 64000, annualDividend: 4000 })];
+    const { plan: p } = reviveScenario(plan([{ ticker: 'A', sellShares: 1000, sellPrice: 30, holdShares: 2000, cost: 20000 }]), candidates);
+    const s = summarize(p, candidates);
+    const row = p.rows[0];
+    expect(s.realizedPL).toBeCloseTo(1000 * 30 - 10000, 6);
+    expect(s.realizedPLPct).toBeCloseTo((30000 - 10000) / 10000 * 100, 6);
+    expect(s.taxAndFees).toBeCloseTo(row.tax + row.fee, 6);
+    expect(s.annualDividendGivenUp).toBe(0);
+    expect(s.remaining.value).toBe(0);
   });
 
-  it('sold rows lead the table', () => {
-    const candidates = [makeCandidate({ ticker: 'A', shares: 1000, price: 100 }), makeCandidate({ ticker: 'C', shares: 1000, price: 100 })];
-    const sales = [sale({ date: '2026-09-11', ticker: 'B', shares: 10 })];
-    const { plan } = reviveScenario(scenario([{ ticker: 'B', sellShares: 10 }]), candidates, { sales });
-    expect(plan.rows[0].ticker).toBe('B');
+  it('a frozen row is never edited and never written back when saving', () => {
+    const candidates = [makeCandidate({ ticker: 'A', shares: 4000, price: 20, cost: 64000 })];
+    const { plan: p } = reviveScenario(plan([{ ticker: 'A', sellShares: 1000, sellPrice: 30, holdShares: 2000, cost: 20000 }]), candidates);
+    expect(editSellShares(p, candidates, 'A', 5).rows[0]).toMatchObject({ frozen: true, sellShares: 1000 });
+    expect(serializeScenario({ name: 'x', strategyId: 'custom', locked: [], plan: p, candidates }).rows).toEqual([]);
   });
 
-  it('summarize: a sold row beside a live row for the same ticker does not double-count what remains', () => {
-    const candidates = [makeCandidate({ ticker: 'A', shares: 4000, price: 20, cost: 64000, tier: 2, annualDividend: 4000 })];
-    const sales = [sale({ date: '2026-09-11', ticker: 'A', shares: 1000, netProceeds: 29000, cost: 16000, realizedPL: 13000 })];
-    const { plan } = reviveScenario(scenario([{ ticker: 'A', sellShares: 1400 }]), candidates, { discount: 1.0, sales });
-    const s = summarize(plan, candidates);
-
-    expect(s.remaining.value).toBeCloseTo((4000 - 400) * 20, 6); // only the live row's 400 leave the holding
-    const live = plan.rows.find(r => !r.sold);
-    expect(s.taxAndFees).toBeCloseTo(live.tax + live.fee, 6); // the sold row's net already has them deducted
-    expect(s.realizedPL).toBeCloseTo(13000 + live.realizedPL, 6);
-  });
-
-  it('editing Sell Shares changes the live row and leaves the sold row alone', () => {
-    const candidates = [makeCandidate({ ticker: 'A', shares: 5000, price: 20, cost: 80000 })];
-    const sales = [sale({ date: '2026-09-11', ticker: 'A', shares: 1000, netProceeds: 29000 })];
-    const { plan } = reviveScenario(scenario([{ ticker: 'A', sellShares: 1400 }]), candidates, { sales });
-    const edited = editSellShares(plan, candidates, 'A', 700);
-
-    expect(edited.rows.find(r => r.sold)).toMatchObject({ sellShares: 1000, net: 29000 });
-    expect(edited.rows.find(r => !r.sold).sellShares).toBe(700);
-  });
-
-  it('saving a loaded plan writes only what is still planned, not what already sold', () => {
-    const candidates = [makeCandidate({ ticker: 'A', shares: 5000, price: 20, cost: 80000 })];
-    const sales = [sale({ date: '2026-09-11', ticker: 'A', shares: 1000, netProceeds: 29000 })];
-    const { plan } = reviveScenario(scenario([{ ticker: 'A', sellShares: 1400 }]), candidates, { sales });
-    const saved = serializeScenario({ name: 'again', strategyId: 'custom', locked: [], plan });
-
-    expect(saved.rows).toHaveLength(1);
-    expect(saved.rows[0]).toMatchObject({ ticker: 'A', sellShares: 400 });
-    expect(saved.netAtSave).toBeCloseTo(plan.rows.find(r => !r.sold).net, 6);
+  it('buildCsv: a frozen row exports its saved price, not today\'s', () => {
+    const candidates = [makeCandidate({ ticker: 'A', code: '0001', price: 20 })];
+    const { plan: p } = reviveScenario(plan([{ ticker: 'A', sellShares: 1000, sellPrice: 30, holdShares: 2000, cost: 20000 }]), candidates);
+    expect(buildCsv(p, candidates).split('\n')[1].split(',')[3]).toBe('30');
   });
 });
-
-describe('SP-25 realizedSales (design.md §C.12)', () => {
-  it('a clean round trip: net proceeds are the sell amount, cost the buy amount, P/L the difference', () => {
-    const trades = [
-      { date: '2020-01-10', type: 'buy', ticker: 'A', shares: 1000, amount: 80000 },
-      { date: '2021-03-05', type: 'sell', ticker: 'A', shares: 1000, amount: 100000 }
-    ];
-    const { byTicker, totals } = realizedSales(trades, []);
-
-    expect(byTicker).toHaveLength(1);
-    expect(byTicker[0]).toMatchObject({
-      ticker: 'A', shares: 1000, netProceeds: 100000, cost: 80000,
-      realizedPL: 20000, fullyExited: true, sharesReconcile: true
-    });
-    expect(byTicker[0].realizedPLPct).toBeCloseTo(25, 6);
-    expect(totals.realizedPL).toBe(20000);
-  });
-
-  it('a partially-held ticker charges only the sold lots — the held lot\'s cost is excluded', () => {
-    // Two 1,000-share buys, one sold and one still held. The held lot's cost is
-    // the same ledger cell as its buy amount, so it cancels exactly.
-    const trades = [
-      { date: '2020-01-10', type: 'buy', ticker: 'A', shares: 1000, amount: 80000 },
-      { date: '2020-06-10', type: 'buy', ticker: 'A', shares: 1000, amount: 90000 },
-      { date: '2021-03-05', type: 'sell', ticker: 'A', shares: 1000, amount: 100000 }
-    ];
-    const heldLots = [{ date: '2020-06-10', ticker: 'A', shares: 1000, buyPrice: 90, cost: 90000 }];
-    const { byTicker } = realizedSales(trades, heldLots);
-
-    expect(byTicker[0].cost).toBe(80000);
-    expect(byTicker[0].realizedPL).toBe(20000);
-    expect(byTicker[0].fullyExited).toBe(false);
-  });
-
-  it('a PART-sold lot charges only the portion sold, per the ledger\'s remainder row', () => {
-    // One 300-share buy, of which 150 shares were sold and 150 kept. The buy row
-    // is left whole and the kept portion's cost goes on a separate remainder row,
-    // so the sale cost 30,000−16,000. Summing "buy rows not marked held" would
-    // wrongly charge the whole 30,000 to a half-sold lot.
-    const trades = [
-      { date: '2023-07-10', type: 'buy', ticker: 'A', shares: 300, amount: 30000 },
-      { date: '2025-04-18', type: 'sell', ticker: 'A', shares: 150, amount: 20000 }
-    ];
-    const heldLots = [{ date: '2025-04-18', ticker: 'A', shares: 150, buyPrice: 106.67, cost: 16000 }];
-    const { byTicker } = realizedSales(trades, heldLots);
-
-    expect(byTicker[0].cost).toBe(14000);
-    expect(byTicker[0].realizedPL).toBe(6000);
-    expect(byTicker[0].sharesReconcile).toBe(true);
-  });
-
-  it('a zero-cost 配股 lot subtracts nothing but still counts its shares', () => {
-    const trades = [
-      { date: '2021-03-15', type: 'buy', ticker: 'A', shares: 500, amount: 10000 },
-      { date: '2024-01-05', type: 'sell', ticker: 'A', shares: 510, amount: 12000 }
-    ];
-    // 10 shares arrived as a stock dividend — real shares, no cash behind them.
-    const heldLots = [{ date: '2022-01-28', ticker: 'A', shares: 10, buyPrice: 0, cost: 0 }];
-    const { byTicker } = realizedSales(trades, heldLots);
-
-    expect(byTicker[0].cost).toBe(10000);
-    expect(byTicker[0].realizedPL).toBe(2000);
-  });
-
-  it('a null-share held lot still cancels its cost (it is held, merely unusable for share maths)', () => {
-    const trades = [
-      { date: '2020-01-10', type: 'buy', ticker: 'A', shares: 1000, amount: 80000 },
-      { date: '2020-06-10', type: 'buy', ticker: 'A', shares: null, amount: 90000 },
-      { date: '2021-03-05', type: 'sell', ticker: 'A', shares: 1000, amount: 100000 }
-    ];
-    const heldLots = [{ date: '2020-06-10', ticker: 'A', shares: null, buyPrice: null, cost: 90000 }];
-    expect(realizedSales(trades, heldLots).byTicker[0].cost).toBe(80000);
-  });
-
-  it('share counts that do not reconcile (e.g. a 配股 stock dividend) keep exact cash figures but flag the per-share split', () => {
-    // 1,000 shares bought, 1,200 sold — the extra 200 came from a stock dividend
-    // with no buy row behind it. Money in and money out are still exact.
-    const trades = [
-      { date: '2020-01-10', type: 'buy', ticker: 'A', shares: 1000, amount: 80000 },
-      { date: '2021-03-05', type: 'sell', ticker: 'A', shares: 1200, amount: 100000 }
-    ];
-    const { byTicker, sales, notices } = realizedSales(trades, []);
-
-    expect(byTicker[0].netProceeds).toBe(100000);
-    expect(byTicker[0].cost).toBe(80000);
-    expect(byTicker[0].realizedPL).toBe(20000);
-    expect(byTicker[0].sharesReconcile).toBe(false);
-    expect(notices.unreconciled).toEqual(['A']);
-    expect(sales[0].allocated).toBe(true);
-  });
-
-  it('per-sale cost is allocated at the average cost of the shares sold, and sums back to the ticker total', () => {
-    const trades = [
-      { date: '2020-01-10', type: 'buy', ticker: 'A', shares: 2000, amount: 160000 },
-      { date: '2021-03-05', type: 'sell', ticker: 'A', shares: 500, amount: 60000 },
-      { date: '2021-09-05', type: 'sell', ticker: 'A', shares: 1500, amount: 150000 }
-    ];
-    const { sales, byTicker } = realizedSales(trades, []);
-
-    expect(sales).toHaveLength(2);
-    expect(sales.map(s => s.date)).toEqual(['2021-09-05', '2021-03-05']); // newest first
-    const sum = sales.reduce((s, r) => s + r.cost, 0);
-    expect(sum).toBeCloseTo(byTicker[0].cost, 6);
-    expect(sales.reduce((s, r) => s + r.realizedPL, 0)).toBeCloseTo(byTicker[0].realizedPL, 6);
-  });
-
-  it('a non-positive cost basis yields a null percentage rather than Infinity or NaN', () => {
-    // Everything bought is still held, yet a sell exists — the derived sold cost
-    // is 0, so there is no denominator to divide by.
-    const trades = [
-      { date: '2020-01-10', type: 'buy', ticker: 'A', shares: 1000, amount: 80000 },
-      { date: '2021-03-05', type: 'sell', ticker: 'A', shares: 500, amount: 60000 }
-    ];
-    const heldLots = [{ date: '2020-01-10', ticker: 'A', shares: 1000, buyPrice: 80, cost: 80000 }];
-    const { byTicker, sales, totals } = realizedSales(trades, heldLots);
-
-    expect(byTicker[0].cost).toBe(0);
-    expect(byTicker[0].realizedPLPct).toBeNull();
-    expect(sales[0].realizedPLPct).toBeNull();
-    expect(Number.isFinite(totals.realizedPL)).toBe(true);
-  });
-
-  it('a sell with no share count still reports its proceeds, with no allocated P/L', () => {
-    const trades = [
-      { date: '2020-01-10', type: 'buy', ticker: 'A', shares: 1000, amount: 80000 },
-      { date: '2021-03-05', type: 'sell', ticker: 'A', shares: null, amount: 100000 }
-    ];
-    const { sales, byTicker } = realizedSales(trades, []);
-
-    expect(sales[0].netProceeds).toBe(100000);
-    expect(sales[0].realizedPL).toBeNull();
-    expect(sales[0].realizedPLPct).toBeNull();
-    expect(byTicker[0].realizedPL).toBe(20000); // the ticker-level cash figure is unaffected
-  });
-
-  it('a ticker that was never sold never appears, and ticker whitespace is normalised', () => {
-    const trades = [
-      { date: '2020-01-10', type: 'buy', ticker: '台積電', shares: 1000, amount: 80000 },
-      { date: '2020-01-10', type: 'buy', ticker: '鴻海 ', shares: 1000, amount: 50000 },
-      { date: '2021-03-05', type: 'sell', ticker: '鴻海', shares: 1000, amount: 60000 }
-    ];
-    const { byTicker } = realizedSales(trades, []);
-
-    expect(byTicker.map(t => t.ticker)).toEqual(['鴻海']);
-    expect(byTicker[0].cost).toBe(50000); // the trailing-space buy row matched
-  });
-
-  it('totals are the sum of the per-ticker figures', () => {
-    const trades = [
-      { date: '2020-01-10', type: 'buy', ticker: 'A', shares: 1000, amount: 80000 },
-      { date: '2021-03-05', type: 'sell', ticker: 'A', shares: 1000, amount: 100000 },
-      { date: '2020-02-10', type: 'buy', ticker: 'B', shares: 1000, amount: 50000 },
-      { date: '2021-04-05', type: 'sell', ticker: 'B', shares: 1000, amount: 30000 }
-    ];
-    const { byTicker, totals } = realizedSales(trades, []);
-
-    expect(totals.netProceeds).toBe(byTicker.reduce((s, t) => s + t.netProceeds, 0));
-    expect(totals.cost).toBe(byTicker.reduce((s, t) => s + t.cost, 0));
-    expect(totals.realizedPL).toBe(0); // +20,000 and −20,000
-  });
-
-  it('empty or missing input is not an error', () => {
-    expect(realizedSales([], []).sales).toEqual([]);
-    expect(realizedSales(undefined, undefined).totals.realizedPL).toBe(0);
-    expect(realizedSales(undefined, undefined).totals.realizedPLPct).toBeNull();
-  });
-});
-

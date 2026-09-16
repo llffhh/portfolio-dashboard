@@ -521,17 +521,19 @@ and named in the panel's footnote. Per-ticker and total figures are never approx
 **Non-positive denominators yield `null`, never `Infinity`/`NaN`** — a ticker whose every purchase is
 still held has a derived sold cost of 0, so there is no percentage to report; it renders as `—`.
 
-**UI — superseded by §C.13.** Rev 4.4 shipped this as a separate 已賣出部位 card listing every sale
-in the ledger. That answered the wrong question: the user wanted a *loaded scenario* to show what
-actually became of it, in the Plan detail table itself. The card is removed; `realizedSales` stays as
-the source of per-sale figures that §C.13 matches against a scenario.
-
-`initSellPlanner`'s ctx gains `trades` and `lots` (`src/app.js`), both already loaded for the
-dashboard. No Sheet schema change, no `gas/Code.js` change, no redeploy.
+**Superseded in the app by §C.13, then §C.14.** Rev 4.4 shipped this as a separate 已賣出部位 card;
+Rev 4.5 replaced the card with ledger matching inside Plan detail; Rev 4.6 replaced that with save-day
+snapshots. `realizedSales` is no longer in `sellplanner.js`. The cost rule above survives as
+`ledger_sales` in `scripts/rebuild_sellplans.py`, which uses it to rebuild snapshots for plans saved
+before §C.14.
 
 ---
 
-### C.13 A loaded scenario shows what actually happened to it (amendment, 2026-09-16)
+### C.13 A loaded scenario shows what actually happened to it (amendment, 2026-09-16) — superseded by §C.14
+
+*Kept for the record. Rev 4.6 removed `attributeSales`: matching a plan to sales dated on or after its
+save day fails for plans recorded after the selling (e.g. a "sellingPortion" plan saved 09-15 listing
+sales from 09-10 to 09-14), whose rows then matched nothing and read as zero.*
 
 §C.11 made a loaded scenario keep its since-sold rows, frozen at the figures saved with the plan. In
 practice there are no such figures to show: every scenario in the SellPlans tab predates §C.11, and
@@ -582,6 +584,58 @@ Callers that omit `sales` get the §C.11 behaviour unchanged.
 - CSV export leaves a sold row's price blank rather than substituting today's.
 
 The separate §C.12 panel is removed. No Sheet schema change, no `gas/Code.js` change, no redeploy.
+
+---
+
+### C.14 A saved plan is valued at its save-day snapshot (amendment, 2026-09-16)
+
+§C.11 and §C.13 both tried to infer, at load time, what had become of a plan. Neither works for every
+plan: one relied on figures that were never saved, the other on sales happening *after* the save.
+The user's direction: record what the plan was when it was saved, and calculate from that.
+
+**SP-27 — the row schema.** Each saved row is a snapshot:
+
+```json
+{"ticker": "…", "sellShares": 20, "sellPrice": 723, "holdShares": 100, "cost": 60000}
+```
+
+`sellPrice` is the price the plan was valued at; `holdShares` / `cost` are the position it sold from.
+`serializeScenario` takes them from the candidate at the moment of saving (the planner's own live
+price). `gas/Code.js`'s `validateScenario_` accepts and preserves the three fields, each optional,
+numeric, finite and non-negative (deployed as Apps Script version 11). It validates on read as well as
+on save, so without that redeploy the fields would be stripped however they reached column D.
+
+**`snapshotRow(saved, { discount })`** (`sellplanner.js`, pure) values one row:
+`proceeds(sellShares, sellPrice)` for gross / tax / fee / net;
+`realizedPL = gross − sellShares × cost / holdShares` (on gross, like `makeRow`);
+`realizedPLPct = realizedPL / (sellShares × cost / holdShares) × 100`, `null` when nothing was held or
+the cost is 0. A row with no `sellPrice` counts as 0 and is marked `priceMissing`. A legacy row with
+`price` but no holdings keeps the P/L it was saved with.
+
+**`reviveScenario`**: a plan with any snapshot row is shown **as it stood** — its own rows only, all
+`frozen`, nothing re-priced, no zero rows for other holdings, read-only. The progress card names the
+plan and its save day; the dividend and "left after" figures describe today's holdings, and say so.
+Save is refused on this view (there is nothing new to save). A plan with no snapshot at all keeps the
+§C.11 behaviour. `summarize`, `editSellShares`, `serializeScenario` and `buildCsv` treat `frozen`
+exactly as `sold`.
+
+**Backfilling plans saved before SP-27** — `scripts/rebuild_sellplans.py`. Read-only against the Sheet;
+writes `backups/SellPlans-rebuilt-<timestamp>.xlsx` (tab SellPlans = id | savedAt | name | new column-D
+JSON, in the Sheet's order; tab Check = every row's figures and per-plan totals) for the user to review
+and paste over column D. Rules:
+
+- **sellPrice** = the close on the plan's save day (Taiwan date), or the last trading day before it.
+  Plans saved after the 13:30 close reproduce their recorded `netAtSave` to the dollar, because the
+  planner's live price then *was* the close — which validates both the price and the position below.
+- **Code** from the user's own dividend records first, `segments.json` second, and accepted only if
+  its latest market close is within 15% of the Sheet's current price for that name. This caught three
+  wrong codes in `segments.json` (藍新資訊, 波若威, 聯陽 — each mapped to another company or to
+  nothing), now corrected.
+- **holdShares / cost** = today's HeldLots with every trade dated on or after the save day undone
+  (sales added back at their §C.12 derived cost; buys removed). If the plan sells more than that — a
+  plan recorded *after* its sales — earlier sales of the ticker are added back newest first until the
+  planned shares are covered. No lookback window is needed: the roll-back stops as soon as the plan
+  is covered.
 
 ---
 

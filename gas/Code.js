@@ -115,6 +115,10 @@ function validateScenario_(s) {
     if (r.net != null) { if (!isNum(r.net, -1e12, 1e12)) return null; row.net = r.net; }
     if (r.realizedPL != null) { if (!isNum(r.realizedPL, -1e12, 1e12)) return null; row.realizedPL = r.realizedPL; }
     if (r.realizedPLPct != null) { if (!isNum(r.realizedPLPct, -1e6, 1e6)) return null; row.realizedPLPct = r.realizedPLPct; }
+    // design.md §C.14: the save-day snapshot a plan is valued from on reload.
+    if (r.sellPrice != null) { if (!isNum(r.sellPrice, 0, 1e9)) return null; row.sellPrice = r.sellPrice; }
+    if (r.holdShares != null) { if (!isNum(r.holdShares, 0, 1e8)) return null; row.holdShares = r.holdShares; }
+    if (r.cost != null) { if (!isNum(r.cost, 0, 1e12)) return null; row.cost = r.cost; }
     rows.push(row);
   }
 

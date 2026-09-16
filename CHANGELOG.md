@@ -1,5 +1,25 @@
 # Changelog
 
+## [Rev 4.6] — Saved plans valued at their save-day snapshot (2026-09-16)
+
+See design.md §C.14. Replaces Rev 4.5's ledger matching, which zeroed out plans recorded after their sales.
+
+### Changed
+- **Each saved row is now a snapshot:** `{ticker, sellShares, sellPrice, holdShares, cost}` — the price the plan was valued at and the position it sold from. Loading a saved plan shows it exactly as it stood that day: its own rows only, Net Proceeds / Realized P/L / Realized P/L % calculated from the snapshot, never re-priced, no zero rows for other holdings. The view is read-only; Save is refused on it.
+- New plans record the snapshot from the planner at the moment of saving.
+- **Apps Script redeployed (version 11, same URL):** `validateScenario_` keeps `sellPrice`, `holdShares`, `cost`. It validates on read too, so the fields were invisible before this.
+
+### Added
+- `scripts/rebuild_sellplans.py` (+ `scripts/test_rebuild_sellplans.py`): rebuilds column D of the SellPlans tab for plans saved before the snapshot existed — save-day close from Yahoo Finance, position at the save day reconstructed from the ledger. Read-only against the Sheet; writes a workbook to `backups/` to review and paste. For plans saved after the market close it reproduces the recorded `netAtSave` to the dollar.
+
+### Fixed
+- `src/segments.json` had wrong stock codes for 藍新資訊, 波若威 and 聯陽 (another company, or no listing). Corrected from the dividend records and confirmed against market data.
+
+### Removed
+- Rev 4.5's `attributeSales` ledger matching and `realizedSales()` from the app; the cost rule lives on in the Python script.
+
+Tests: 94 Vitest + 27 Python unittest.
+
 ## [Rev 4.5] — Loaded plans show what actually happened, in Plan detail (2026-09-16)
 
 See design.md §C.13. Replaces Rev 4.4's separate panel, which answered the wrong question.
