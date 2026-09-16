@@ -143,11 +143,23 @@ describe('SP-19/SP-20 — Apps Script SellPlans write path (gas/Code.js)', () =>
       scenario({ rows: Array.from({ length: 61 }, (_, i) => ({ ticker: 'T' + i, sellShares: 1 })) }),
       scenario({ savedAt: 'not a date' }),
       scenario({ name: '' }),
-      scenario({ netAtSave: 'lots' })
+      scenario({ netAtSave: 'lots' }),
+      // SP-11 amendment (design.md §C.11): the new optional per-row fields are
+      // validated too, not just passed through.
+      scenario({ rows: [{ ticker: '甲', sellShares: 1, price: -1 }] }),
+      scenario({ rows: [{ ticker: '甲', sellShares: 1, sellPct: 1.5 }] }),
+      scenario({ rows: [{ ticker: '甲', sellShares: 1, realizedPLPct: 'lots' }] })
     ];
     for (const s of bad) expect(g.post({ key: 'K', action: 'save', scenario: s })).toEqual({ error: 'bad_request' });
     expect(g.post({ key: 'K', action: 'delete', id: '../HeldLots' })).toEqual({ error: 'bad_request' });
     expect(g.sheets.SellPlans).toBeUndefined();
+  });
+
+  it('SP-11 amendment (design.md §C.11): a row\'s historical price/figures survive the round trip through the Sheet', () => {
+    const rows = [{ ticker: '甲', sellShares: 500, sellPct: 1, price: 80, gross: 40000, tax: 120, fee: 57, net: 39823, realizedPL: 6000, realizedPLPct: 17.6 }];
+    expect(g.post({ key: 'K', action: 'save', scenario: scenario({ rows }) })).toEqual({ ok: true, id: 'sc_1' });
+    const list = g.get({ key: 'K', resource: 'sellplans' });
+    expect(list[0].rows).toEqual(rows);
   });
 
   it('SP-19: the write path can only ever touch the SellPlans tab', () => {

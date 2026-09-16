@@ -318,8 +318,8 @@ describe('Rev 4.0 Sell Planner acceptance tests (design.md Section C)', () => {
       const plan = {
         strategyId: 'tagTiered',
         rows: [
-          { ticker: 'A', sellShares: 300, sellPct: 0.3, gross: 30000, tax: 90, fee: 42.75, net: 29867.25, realizedPL: 1000 },
-          { ticker: 'B', sellShares: 0, sellPct: 0, gross: 0, tax: 0, fee: 0, net: 0, realizedPL: 0 },
+          { ticker: 'A', sellShares: 300, sellPct: 0.3, gross: 30000, tax: 90, fee: 42.75, net: 29867.25, realizedPL: 1000, realizedPLPct: 1000 / 29000 * 100 },
+          { ticker: 'B', sellShares: 0, sellPct: 0, gross: 0, tax: 0, fee: 0, net: 0, realizedPL: 0, realizedPLPct: 0 },
         ],
         totals: { gross: 30000, tax: 90, fee: 42.75, net: 29867.25, realizedPL: 1000 }
       };
@@ -328,7 +328,13 @@ describe('Rev 4.0 Sell Planner acceptance tests (design.md Section C)', () => {
 
       const loaded = loadScenarios(storage);
       expect(loaded).toHaveLength(1);
-      expect(loaded[0].rows).toEqual([{ ticker: 'A', sellShares: 300 }]);
+      // SP-11 amendment (design.md §C.11): a saved row now also carries price
+      // (derived from gross/sellShares) and its dollar figures, not just the
+      // share count — needed so a since-sold position can still be shown at
+      // its save-time price/history instead of vanishing on reload.
+      expect(loaded[0].rows).toEqual([
+        { ticker: 'A', sellShares: 300, sellPct: 0.3, price: 100, gross: 30000, tax: 90, fee: 42.75, net: 29867.25, realizedPL: 1000, realizedPLPct: 1000 / 29000 * 100 }
+      ]);
       expect(loaded[0].name).toBe('Test plan');
 
       // Corrupt the store directly and confirm it is left untouched.
@@ -374,6 +380,63 @@ describe('Rev 4.0 Sell Planner acceptance tests (design.md Section C)', () => {
       const scenario = { id: 'sc2', name: 'Stale', savedAt: new Date().toISOString(), strategyId: 'custom', locked: [], rows: [{ ticker: 'A', sellShares: 9999 }], note: '' };
       const { plan } = reviveScenario(scenario, candidates, { discount: 1.0 });
       expect(plan.rows[0].sellShares).toBe(100); // clamped to shares held
+    });
+
+    it('reviveScenario amendment (design.md §C.11): a since-sold ticker (absent from heldTickers) is listed frozen at its save-time price, not dropped', () => {
+      const candidates = [makeCandidate({ ticker: 'A', shares: 1000, price: 120, cost: 80000, tier: 1 })];
+      const scenario = {
+        id: 'sc3', name: 'Two-name plan', savedAt: new Date().toISOString(), strategyId: 'custom', locked: [],
+        rows: [
+          { ticker: 'A', sellShares: 400 },
+          { ticker: 'B', sellShares: 200, sellPct: 1, price: 80, gross: 16000, tax: 48, fee: 22.8, net: 15929.2, realizedPL: 6000, realizedPLPct: 60 }
+        ],
+        note: ''
+      };
+      // B is not in `candidates` (no longer a live position) and not in
+      // heldTickers either (actually sold, unlike a merely-locked position).
+      const heldTickers = new Set(['A']);
+      const { plan } = reviveScenario(scenario, candidates, { discount: 1.0, heldTickers });
+
+      expect(plan.rows).toHaveLength(2);
+      const rowA = plan.rows.find(r => r.ticker === 'A');
+      const rowB = plan.rows.find(r => r.ticker === 'B');
+      expect(rowA.sold).toBe(false);
+      expect(rowB).toMatchObject({ sold: true, price: 80, sellShares: 200, net: 15929.2, realizedPL: 6000, realizedPLPct: 60 });
+      // The sold row's net still counts toward the plan's totals — the record
+      // must not understate what this plan actually raised.
+      expect(plan.totals.net).toBeCloseTo(rowA.net + 15929.2, 6);
+    });
+
+    it('reviveScenario does not treat a merely-locked (still-held) ticker as sold', () => {
+      const candidates = [makeCandidate({ ticker: 'A', shares: 1000, price: 120, cost: 80000, tier: 1 })];
+      // B is held (in heldTickers) but excluded from `candidates` right now —
+      // e.g. locked, or briefly missing a price — which is not the same as sold.
+      const heldTickers = new Set(['A', 'B']);
+      const scenario = {
+        id: 'sc4', name: 'Locked plan', savedAt: new Date().toISOString(), strategyId: 'custom', locked: ['B'],
+        rows: [{ ticker: 'A', sellShares: 100 }, { ticker: 'B', sellShares: 50, price: 10, gross: 500, tax: 1.5, fee: 20, net: 478.5, realizedPL: 100, realizedPLPct: 25 }],
+        note: ''
+      };
+      const { plan } = reviveScenario(scenario, candidates, { discount: 1.0, heldTickers });
+      expect(plan.rows.map(r => r.ticker)).toEqual(['A']); // B dropped, not shown as a sold row
+    });
+
+    it('summarize (design.md §C.11 amendment) still folds a row with no matching candidate into realizedPL/net-raised totals, but not remaining-portfolio figures', () => {
+      const candidates = [makeCandidate({ ticker: 'A', shares: 1000, price: 120, cost: 80000, tier: 1, annualDividend: 1000 })];
+      const plan = {
+        strategyId: 'custom',
+        rows: [
+          { ticker: 'A', sellShares: 400, sellPct: 0.4, gross: 48000, tax: 144, fee: 68.4, net: 47787.6, realizedPL: 16000, realizedPLPct: 33.33 },
+          { ticker: 'B', sellShares: 200, sellPct: 1, gross: 16000, tax: 48, fee: 22.8, net: 15929.2, realizedPL: 6000, realizedPLPct: 60, sold: true, price: 80 }
+        ]
+      };
+      const summary = summarize(plan, candidates);
+      expect(summary.positionsTouched).toBe(2); // both rows sold shares
+      expect(summary.positionsLiquidated).toBe(1); // only B's sellPct === 1
+      expect(summary.realizedPL).toBeCloseTo(16000 + 6000, 6);
+      expect(summary.taxAndFees).toBeCloseTo(144 + 68.4 + 48 + 22.8, 6);
+      // remaining value only reflects A (the live candidate) — B has nothing left to remain
+      expect(summary.remaining.value).toBeCloseTo(600 * 120, 6);
     });
 
     it('buildCsv emits header + one row per touched position, skipping untouched rows', () => {

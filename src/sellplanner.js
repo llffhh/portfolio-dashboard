@@ -293,18 +293,24 @@ export function summarize(plan, candidates) {
 
   for (const row of plan.rows) {
     const c = byTicker[row.ticker];
-    if (!c) continue;
 
-    if (row.sellShares > 0) positionsTouched++;
-    if (c.shares > 0 && row.sellShares === c.shares) positionsLiquidated++;
-
+    // A row can outlive its candidate — a scenario reloaded after the position
+    // was actually sold (see sellplanner-ui.js reviveScenario) carries its
+    // save-time figures with no live candidate to match. Everything derivable
+    // from the row alone still counts; only the remaining-portfolio figures,
+    // which need a live position, are skipped for it.
+    if (row.sellShares > 0) {
+      positionsTouched++;
+      if (row.sellPct === 1) positionsLiquidated++;
+    }
     realizedPL += row.realizedPL;
-    annualDividendGivenUp += c.annualDividend * row.sellPct;
     taxAndFees += row.tax + row.fee;
     soldValueTotal += row.gross;
-    if (c.tier === 1) soldValueTier1 += row.gross;
-    costBasisSold += c.shares > 0 ? row.sellShares * (c.cost / c.shares) : 0;
+    costBasisSold += row.gross - row.realizedPL;
+    if (c && c.tier === 1) soldValueTier1 += row.gross;
+    if (!c) continue;
 
+    annualDividendGivenUp += c.annualDividend * row.sellPct;
     const remainingShares = c.shares - row.sellShares;
     const remVal = remainingShares * c.price;
     remainingValue += remVal;

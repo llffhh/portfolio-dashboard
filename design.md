@@ -443,6 +443,38 @@ is automatically re-pointed at the previous version. `config.js` values are read
 
 ---
 
+### C.11 A loaded scenario keeps its since-sold positions (amendment, 2026-09-16)
+
+SP-11 said a scenario stores share counts, not prices, so a reload re-prices at today's market. That
+silently assumed every saved ticker is still a live candidate. It is not, once the user actually executes
+part of a plan: the sold ticker drops out of `HeldLots`/`ctx.holdings` entirely, `reviveScenario` only ever
+iterated `candidates`, and the row for that ticker vanished from the reloaded plan with no trace — the
+saved record understated what the plan had actually raised.
+
+**SP-23 — A saved row now also carries the figures it was computed with**, not just `{ticker,sellShares}`:
+`sellPct`, `price` (derived from `gross/sellShares` — exact, since `gross = sellShares×price` by
+construction in `proceeds()`), `gross`, `tax`, `fee`, `net`, `realizedPL`, `realizedPLPct`. All are
+optional on read, so a pre-amendment scenario still loads (its since-sold rows are shown with a "price not
+recorded" placeholder rather than failing). `gas/Code.js`'s `validateScenario_` validates and preserves
+each field (bounded, same style as `sellShares`) instead of stripping it, so the Sheet-synced path keeps
+the history too, not just `localStorage`.
+
+**SP-24 — `reviveScenario` distinguishes "still held, just excluded from planning" from "actually sold".**
+It takes an optional `heldTickers` (every currently-held ticker, independent of lock/no-price/delisted
+exclusion). A saved row whose ticker is missing from `candidates` but present in `heldTickers` is dropped
+as before (SP-11) — it's locked or briefly unpriced, not sold, and re-showing it as "sold" would be false.
+A row missing from **both** is shown as a read-only line at its save-time price/name/figures (`sold: true`
+on the row), never re-priced — there is nothing left to re-price against. Its `net`/`realizedPL` still
+fold into the plan's totals (`summarize`, `sellplanner.js`) so the loaded record isn't short by exactly the
+part that was executed. The UI (`sellplanner-ui.js` `renderDetail`, `index.html`'s `sp-detail-table`) marks
+it 已賣出, disables its lock checkbox and share-count input, and adds a Price column so both the live and
+historical rows show what they were valued at.
+
+Callers that omit `heldTickers` (e.g. existing tests) keep the simpler pre-SP-24 behaviour of treating any
+candidate-absent row as sold.
+
+---
+
 ## Verified figures (offline, from current ledger)
 | Quantity | Value |
 |---|---|

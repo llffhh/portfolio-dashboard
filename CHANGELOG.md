@@ -1,5 +1,19 @@
 # Changelog
 
+## [Rev 4.3] — Sold positions stay visible in a loaded plan (2026-09-16)
+
+Amendment to design.md §C.10 (SP-11); see §C.11 for the full rationale.
+
+### Fixed
+- Loading a saved Sell Planner scenario silently dropped any row whose ticker had since actually been sold (removed from `HeldLots`) — `reviveScenario` only ever matched against current candidates, so the reloaded plan understated what it had really raised. A saved row now also carries its own price and dollar figures (`sellPct`, `price`, `gross`, `tax`, `fee`, `net`, `realizedPL`, `realizedPLPct`), so a since-sold ticker is still listed — frozen at its save-time price, marked 已賣出, read-only — instead of vanishing, and still counts toward the loaded plan's totals.
+- A merely **locked** or briefly unpriced ticker (still held, just excluded from planning right now) is not confused with an actually-sold one: `reviveScenario` takes the full set of currently-held tickers to tell the two apart.
+- `gas/Code.js`'s `validateScenario_` now validates and preserves these new per-row fields (bounded) instead of silently stripping them, so the historical price survives a round trip through the Sheet-synced store, not just `localStorage`.
+
+### Added
+- A **Price** column in the Sell Planner's detail table (`sp-detail-table`), shown for both live and historical rows.
+
+Tests: 83 (Vitest). Not yet deployed to Apps Script — the schema change only widens `validateScenario_`'s accepted fields, but redeploy is a separate, explicit step (see `gas/deploy.mjs` invariants, SP-22).
+
 ## [Rev 4.2] — Saved plans synced to the Google Sheet (2026-09-10)
 
 ### Added

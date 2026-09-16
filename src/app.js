@@ -6,8 +6,8 @@ import {
   roi, xirr, simpleCagr, dividendsByYear, depositsByYear, yearlyPnL,
   portfolioValueOverTime, buildXirrCashflows, yieldOnCost
 } from './metrics.js?v=33';
-import { initSellPlanner } from './sellplanner-ui.js?v=7';
-import { annualDividendFor } from './sellplanner.js?v=4';
+import { initSellPlanner } from './sellplanner-ui.js?v=8';
+import { annualDividendFor } from './sellplanner.js?v=5';
 
 // Shares held per ticker as of a date (tolerant app-side variant of MET-9's
 // reconstruction — missing prices are skipped and surfaced, not thrown).

@@ -7,7 +7,7 @@ import {
   buildCandidates, proceeds, solveFill, summarize,
   tagTiered, yieldProtect, proportional, cutLosers,
   TARGET_NET
-} from './sellplanner.js?v=4';
+} from './sellplanner.js?v=5';
 
 export const SCENARIO_KEY = 'sellPlanner.scenarios.v1';
 export const SCENARIO_VERSION = 1;
@@ -47,6 +47,12 @@ function makeScenarioId() {
 // optional field beyond the C.0 schema (not required by any consumer) kept
 // only so the UI can show proceeds drift after a reload re-prices the plan —
 // see Gemini Notes for why this was added.
+// SP-11 amendment (design.md §C.11): a row also carries the figures it was
+// computed with at save time (price derived from gross/sellShares — exact,
+// since gross = sellShares×price by construction in proceeds()). A live
+// reload still re-prices at today's market; the saved figures exist so a
+// position that's since been fully sold has something to fall back to
+// instead of vanishing from the record (see reviveScenario below).
 export function serializeScenario({ name, strategyId, locked, plan, note }) {
   return {
     id: makeScenarioId(),
@@ -54,7 +60,18 @@ export function serializeScenario({ name, strategyId, locked, plan, note }) {
     savedAt: new Date().toISOString(),
     strategyId,
     locked: locked || [],
-    rows: plan.rows.filter(r => r.sellShares > 0).map(r => ({ ticker: r.ticker, sellShares: r.sellShares })),
+    rows: plan.rows.filter(r => r.sellShares > 0).map(r => ({
+      ticker: r.ticker,
+      sellShares: r.sellShares,
+      sellPct: r.sellPct ?? null,
+      price: r.sellShares > 0 ? r.gross / r.sellShares : null,
+      gross: r.gross,
+      tax: r.tax,
+      fee: r.fee,
+      net: r.net,
+      realizedPL: r.realizedPL,
+      realizedPLPct: r.realizedPLPct ?? null
+    })),
     note: note || '',
     netAtSave: plan.totals.net
   };
@@ -79,9 +96,21 @@ export function deleteScenario(id, storage = defaultStorage()) {
 
 // Re-prices a saved scenario's share counts against today's candidates
 // (SP-11: "a reloaded scenario re-prices at today's market").
+//
+// SP-11 amendment (design.md §C.11): `opts.heldTickers`, when passed, is the
+// full set of currently-held tickers (regardless of lock/no-price/etc.
+// exclusion from planning). A saved row whose ticker is missing from
+// `candidates` is either still held but excluded right now (locked, no
+// price today, delisted, ...) — dropped as before — or genuinely absent from
+// `heldTickers` altogether, meaning it was actually sold since the scenario
+// was saved. That second case must not vanish from the record: it is listed
+// frozen at its save-time price and figures, never re-priced (there is
+// nothing left to re-price against). Callers that omit `heldTickers` get the
+// old, simpler behaviour of treating every candidate-absent row as sold.
 export function reviveScenario(scenario, candidates, opts = {}) {
   const discount = opts.discount ?? 1.0;
   const byTicker = Object.fromEntries(candidates.map(c => [c.ticker, c]));
+  const heldTickers = opts.heldTickers;
   const rows = [];
   for (const c of candidates) {
     const saved = scenario.rows.find(r => r.ticker === c.ticker);
@@ -96,7 +125,31 @@ export function reviveScenario(scenario, candidates, opts = {}) {
       sellPct: c.shares > 0 ? sellShares / c.shares : 0,
       gross: p.gross, tax: p.tax, fee: p.fee, net: p.net,
       realizedPL,
-      realizedPLPct: costBasisSold > 0 ? (realizedPL / costBasisSold) * 100 : 0
+      realizedPLPct: costBasisSold > 0 ? (realizedPL / costBasisSold) * 100 : 0,
+      price: c.price,
+      sold: false
+    });
+  }
+  for (const saved of scenario.rows) {
+    if (byTicker[saved.ticker]) continue;
+    if (heldTickers && heldTickers.has(saved.ticker)) continue; // still held, just excluded from planning right now
+    if (saved.price == null) {
+      // Pre-amendment scenario: no historical price was ever saved for it.
+      rows.push({
+        ticker: saved.ticker, sellShares: saved.sellShares, sellPct: null,
+        gross: 0, tax: 0, fee: 0, net: 0, realizedPL: 0, realizedPLPct: null,
+        price: null, sold: true, priceMissing: true
+      });
+      continue;
+    }
+    rows.push({
+      ticker: saved.ticker,
+      sellShares: saved.sellShares,
+      sellPct: saved.sellPct ?? null,
+      gross: saved.gross, tax: saved.tax, fee: saved.fee, net: saved.net,
+      realizedPL: saved.realizedPL, realizedPLPct: saved.realizedPLPct,
+      price: saved.price,
+      sold: true
     });
   }
   const totals = rows.reduce((acc, r) => ({
@@ -163,7 +216,8 @@ export function buildCsv(plan, candidates) {
     .filter(r => r.sellShares > 0)
     .map(r => {
       const c = byTicker[r.ticker] || {};
-      return [r.ticker, c.code || '', r.sellShares, c.price ?? '', r.gross.toFixed(2), r.tax.toFixed(2), r.fee.toFixed(2), r.net.toFixed(2), r.realizedPL.toFixed(2)].join(',');
+      const price = r.price ?? c.price ?? '';
+      return [r.ticker, c.code || '', r.sellShares, price, r.gross.toFixed(2), r.tax.toFixed(2), r.fee.toFixed(2), r.net.toFixed(2), r.realizedPL.toFixed(2)].join(',');
     });
   return [header, ...lines].join('\n');
 }
@@ -345,6 +399,11 @@ export async function initSellPlanner(ctx) {
   const localStore = new LocalScenarioStore();
   let store = remoteStore || localStore;
   let candidates = [];
+  // SP-11 amendment (design.md §C.11): every currently-held ticker, regardless
+  // of lock/no-price/etc. exclusion from planning — distinguishes "still held,
+  // just excluded right now" from "actually sold since this scenario was
+  // saved" when a loaded scenario's row has no live candidate to match.
+  const heldTickers = new Set(Object.keys(ctx.holdings || {}));
 
   function recomputeCandidates() {
     const { candidates: all, excluded } = buildCandidates(ctx.holdings, ctx.priceMap, ctx.priceToday, ctx.divs, segmentMap, { dividendYears });
@@ -524,11 +583,33 @@ export async function initSellPlanner(ctx) {
     const byTicker = Object.fromEntries(candidates.map(c => [c.ticker, c]));
     for (const row of activePlan.rows) {
       const c = byTicker[row.ticker];
-      if (!c) continue;
       const tr = document.createElement('tr');
+      if (!c) {
+        // SP-11 amendment (design.md §C.11): a loaded scenario's row for a
+        // position actually sold since — no live candidate to re-price
+        // against. Shown frozen at its save-time price/figures, read-only.
+        const priceCell = row.price != null ? fmt(row.price) : (row.priceMissing ? '<span class="label">not recorded</span>' : '—');
+        const plPctCell = (row.realizedPLPct !== undefined && row.realizedPLPct !== null)
+          ? `${row.realizedPLPct >= 0 ? '+' : ''}${row.realizedPLPct.toFixed(1)}%` : '—';
+        tr.innerHTML = `
+          <td></td>
+          <td>${row.ticker} <span class="label">已賣出</span></td>
+          <td>${priceCell}</td>
+          <td>—</td>
+          <td>—</td>
+          <td>${row.sellShares.toLocaleString()}</td>
+          <td>${fmt(row.net)}</td>
+          <td>${row.realizedPL >= 0 ? '+' : ''}${fmt(row.realizedPL)}</td>
+          <td>${plPctCell}</td>
+          <td>—</td>
+        `;
+        tbody.appendChild(tr);
+        continue;
+      }
       tr.innerHTML = `
         <td><input type="checkbox" class="sp-lock" data-ticker="${c.ticker}" ${locked.has(c.ticker) ? 'checked' : ''}></td>
         <td>${c.ticker}</td>
+        <td>${fmt(c.price)}</td>
         <td>${segmentMap.segments.find(s => s.id === c.segment)?.label || c.segment}</td>
         <td>${c.shares.toLocaleString()}</td>
         <td><input type="number" class="sp-sell-shares" data-ticker="${c.ticker}" min="0" max="${c.shares}" value="${row.sellShares}"></td>
@@ -588,7 +669,7 @@ export async function initSellPlanner(ctx) {
     scenarioList.innerHTML = scenarios.length ? '' : '<div class="label">No saved plans yet.</div>';
     for (const sc of scenarios) {
       const row = document.createElement('div');
-      const { plan, drift } = reviveScenario(sc, candidates, { discount, target: TARGET_NET });
+      const { plan, drift } = reviveScenario(sc, candidates, { discount, target: TARGET_NET, heldTickers });
       row.innerHTML = `
         <span>${esc(sc.name)} (saved ${esc(new Date(sc.savedAt).toLocaleDateString())}) — net now ${fmt(plan.totals.net)}${drift !== undefined ? ` (${drift >= 0 ? '+' : ''}${fmt(drift)} vs. save time)` : ''}</span>
         <button class="btn-toggle sp-load-scenario" data-id="${esc(sc.id)}">Load</button>
@@ -600,7 +681,7 @@ export async function initSellPlanner(ctx) {
       btn.addEventListener('click', () => {
         const sc = scenarios.find(s => s.id === btn.dataset.id);
         if (!sc) return;
-        const { plan } = reviveScenario(sc, candidates, { discount, target: TARGET_NET });
+        const { plan } = reviveScenario(sc, candidates, { discount, target: TARGET_NET, heldTickers });
         customPlan = plan;
         customClearedByLock = false;
         activePlan = plan;

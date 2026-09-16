@@ -95,13 +95,27 @@ function validateScenario_(s) {
   for (var k = 0; k < locked.length; k++) if (!isStr(locked[k], 20)) return null;
 
   if (!Array.isArray(s.rows) || s.rows.length > 60) return null;
+  var isNum = function (v, lo, hi) { return typeof v === 'number' && isFinite(v) && v >= lo && v <= hi; };
   var rows = [];
   for (var i = 0; i < s.rows.length; i++) {
     var r = s.rows[i];
     if (!r || !isStr(r.ticker, 20)) return null;
     var n = r.sellShares;
     if (typeof n !== 'number' || !isFinite(n) || n < 0 || n > 1e8 || Math.floor(n) !== n) return null;
-    rows.push({ ticker: r.ticker, sellShares: n });
+    var row = { ticker: r.ticker, sellShares: n };
+    // SP-11 amendment (design.md §C.11): a row may also carry the figures it
+    // was saved with (all optional, for older clients/scenarios), so a
+    // position sold out of the ledger since can still be shown at its
+    // save-time price/history instead of vanishing on reload.
+    if (r.price != null) { if (!isNum(r.price, 0, 1e9)) return null; row.price = r.price; }
+    if (r.sellPct != null) { if (!isNum(r.sellPct, 0, 1)) return null; row.sellPct = r.sellPct; }
+    if (r.gross != null) { if (!isNum(r.gross, -1e12, 1e12)) return null; row.gross = r.gross; }
+    if (r.tax != null) { if (!isNum(r.tax, -1e12, 1e12)) return null; row.tax = r.tax; }
+    if (r.fee != null) { if (!isNum(r.fee, -1e12, 1e12)) return null; row.fee = r.fee; }
+    if (r.net != null) { if (!isNum(r.net, -1e12, 1e12)) return null; row.net = r.net; }
+    if (r.realizedPL != null) { if (!isNum(r.realizedPL, -1e12, 1e12)) return null; row.realizedPL = r.realizedPL; }
+    if (r.realizedPLPct != null) { if (!isNum(r.realizedPLPct, -1e6, 1e6)) return null; row.realizedPLPct = r.realizedPLPct; }
+    rows.push(row);
   }
 
   var note = s.note == null ? '' : s.note;
