@@ -1,5 +1,19 @@
 # Changelog
 
+## [Rev 4.5] — Loaded plans show what actually happened, in Plan detail (2026-09-16)
+
+See design.md §C.13. Replaces Rev 4.4's separate panel, which answered the wrong question.
+
+### Changed
+- **Loading a saved scenario now shows its real outcome in the Plan detail table.** Each planned position is matched against the ledger's sales on or after the day the plan was saved (Taiwan date), oldest first, capped at the planned share count so a later plan's sales aren't absorbed. The executed part becomes a read-only **已賣出 <date>** row with the actual **Net Proceeds, Realized P/L and Realized P/L %**; an unsold remainder stays an editable row re-priced at today's market. Sold rows lead the table, and the plan's totals and progress now include what was really raised, with a line splitting actual from estimate.
+- Previously every sold row showed "not recorded" with zero proceeds: all saved scenarios predate Rev 4.3's saved figures, and the deployed Apps Script strips those fields on save anyway.
+- Editing Sell Shares on a split position changes only its live row. Re-saving a loaded plan writes only what is still planned.
+
+### Removed
+- The separate **已賣出部位 — Realized sales** panel added in Rev 4.4. `realizedSales()` remains as the source of per-sale figures.
+
+Tests: 107 (Vitest), up from 95. No Sheet schema change and no Apps Script redeploy.
+
 ## [Rev 4.4] — Realized sales on the 賣股規劃 tab (2026-09-16)
 
 See design.md §C.12.

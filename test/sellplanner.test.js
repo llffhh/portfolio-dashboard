@@ -5,7 +5,7 @@ import {
 } from '../src/sellplanner.js';
 import {
   loadScenarios, saveScenario, deleteScenario, serializeScenario, reviveScenario,
-  buildCsv, buildSummaryText, SCENARIO_KEY
+  buildCsv, buildSummaryText, SCENARIO_KEY, attributeSales, editSellShares
 } from '../src/sellplanner-ui.js';
 import realSegmentMap from '../src/segments.json';
 
@@ -549,6 +549,127 @@ describe('SP-18 — the dividend window is a parameter, not a constant', () => {
     expect(annualDividendFor('陽明', dividends, asOf, 0)).toBeCloseTo(16000 / 5, 6);
     expect(annualDividendFor('陽明', dividends, asOf, -2)).toBeCloseTo(16000 / 5, 6);
     expect(Number.isFinite(annualDividendFor('陽明', dividends, asOf, 'x'))).toBe(true);
+  });
+});
+
+describe('SP-26 a loaded scenario shows what actually happened (design.md §C.13)', () => {
+  // Saved on 2026-09-10 in Taiwan (13:36 UTC = 21:36 Taipei).
+  const SAVED = '2026-09-10T13:36:30.000Z';
+  const sale = (o) => ({ shares: 1000, netProceeds: 50000, cost: 40000, realizedPL: 10000, realizedPLPct: 25, allocated: false, ...o });
+  const scenario = (rows) => ({ id: 'sc', name: 'p', savedAt: SAVED, strategyId: 'custom', locked: [], rows, note: '' });
+
+  it('attributeSales: only sales on or after the save day count, oldest first, capped at the planned shares', () => {
+    const sales = [
+      sale({ date: '2026-09-09', ticker: 'A', shares: 100, netProceeds: 1, cost: 1 }),   // before save — ignored
+      sale({ date: '2026-09-15', ticker: 'A', shares: 200, netProceeds: 400, cost: 200 }), // later plan's sale
+      sale({ date: '2026-09-10', ticker: 'A', shares: 25, netProceeds: 50, cost: 20 })     // this plan's sale
+    ];
+    const a = attributeSales(scenario([{ ticker: 'A', sellShares: 25 }]), sales);
+    expect(a.A).toMatchObject({ shares: 25, net: 50, cost: 20, realizedPL: 30, lastDate: '2026-09-10' });
+    expect(a.A.realizedPLPct).toBeCloseTo(150, 6);
+  });
+
+  it('attributeSales: a sale only partly needed is prorated by shares', () => {
+    const sales = [sale({ date: '2026-09-11', ticker: 'A', shares: 250, netProceeds: 500, cost: 250 })];
+    const a = attributeSales(scenario([{ ticker: 'A', sellShares: 100 }]), sales);
+    expect(a.A.shares).toBe(100);
+    expect(a.A.net).toBeCloseTo(200, 6);
+    expect(a.A.cost).toBeCloseTo(100, 6);
+  });
+
+  it('attributeSales: the save day is the Taiwan calendar day, not the UTC one', () => {
+    // 2026-09-09T20:00Z is already 2026-09-10 04:00 in Taipei.
+    const sc = { ...scenario([{ ticker: 'A', sellShares: 100 }]), savedAt: '2026-09-09T20:00:00.000Z' };
+    const sales = [sale({ date: '2026-09-09', ticker: 'A', shares: 100 })];
+    expect(attributeSales(sc, sales)).toEqual({});
+  });
+
+  it('attributeSales: an unparseable savedAt matches nothing rather than everything', () => {
+    const sc = { ...scenario([{ ticker: 'A', sellShares: 100 }]), savedAt: 'not a date' };
+    expect(attributeSales(sc, [sale({ date: '2020-01-01', ticker: 'A' })])).toEqual({});
+  });
+
+  it('a fully executed position that is no longer held shows its real figures and counts toward the total', () => {
+    const candidates = [makeCandidate({ ticker: 'A', shares: 1000, price: 120, cost: 80000 })];
+    const sales = [sale({ date: '2026-09-11', ticker: 'B', shares: 500, netProceeds: 30000, cost: 20000, realizedPL: 10000 })];
+    const { plan } = reviveScenario(scenario([{ ticker: 'B', sellShares: 500 }]), candidates, { heldTickers: new Set(['A']), sales });
+
+    const b = plan.rows.filter(r => r.ticker === 'B');
+    expect(b).toHaveLength(1);
+    expect(b[0]).toMatchObject({ sold: true, actual: true, sellShares: 500, net: 30000, realizedPL: 10000, soldDate: '2026-09-11' });
+    expect(b[0].realizedPLPct).toBeCloseTo(50, 6);
+    expect(plan.totals.net).toBeCloseTo(30000, 6);
+  });
+
+  it('a fully executed position that is still held (other lots remain) is a sold row, and nothing more is planned for it', () => {
+    const candidates = [makeCandidate({ ticker: 'A', shares: 2000, price: 120, cost: 160000 })];
+    const sales = [sale({ date: '2026-09-11', ticker: 'A', shares: 1000 })];
+    const { plan } = reviveScenario(scenario([{ ticker: 'A', sellShares: 1000 }]), candidates, { sales });
+
+    const rows = plan.rows.filter(r => r.ticker === 'A');
+    expect(rows.find(r => r.sold)).toMatchObject({ sellShares: 1000, net: 50000 });
+    expect(rows.find(r => !r.sold).sellShares).toBe(0);
+    expect(plan.totals.net).toBeCloseTo(50000, 6);
+  });
+
+  it('a partly executed position splits: a sold row for what sold, a live row for the rest at today\'s price', () => {
+    const candidates = [makeCandidate({ ticker: 'A', shares: 5000, price: 20, cost: 80000 })];
+    const sales = [sale({ date: '2026-09-11', ticker: 'A', shares: 1000, netProceeds: 29000 })];
+    const { plan } = reviveScenario(scenario([{ ticker: 'A', sellShares: 1400 }]), candidates, { discount: 1.0, sales });
+
+    const sold = plan.rows.find(r => r.ticker === 'A' && r.sold);
+    const live = plan.rows.find(r => r.ticker === 'A' && !r.sold);
+    expect(sold.sellShares).toBe(1000);
+    expect(live.sellShares).toBe(400);
+    expect(live.net).toBeCloseTo(proceeds(400, 20, { discount: 1.0 }).net, 6);
+    expect(plan.totals.net).toBeCloseTo(29000 + live.net, 6);
+  });
+
+  it('an unexecuted position is unchanged — re-priced at today\'s market as before', () => {
+    const candidates = [makeCandidate({ ticker: 'A', shares: 1000, price: 100, cost: 50000 })];
+    const { plan } = reviveScenario(scenario([{ ticker: 'A', sellShares: 300 }]), candidates, { sales: [] });
+    expect(plan.rows).toHaveLength(1);
+    expect(plan.rows[0]).toMatchObject({ sold: false, sellShares: 300 });
+  });
+
+  it('sold rows lead the table', () => {
+    const candidates = [makeCandidate({ ticker: 'A', shares: 1000, price: 100 }), makeCandidate({ ticker: 'C', shares: 1000, price: 100 })];
+    const sales = [sale({ date: '2026-09-11', ticker: 'B', shares: 10 })];
+    const { plan } = reviveScenario(scenario([{ ticker: 'B', sellShares: 10 }]), candidates, { sales });
+    expect(plan.rows[0].ticker).toBe('B');
+  });
+
+  it('summarize: a sold row beside a live row for the same ticker does not double-count what remains', () => {
+    const candidates = [makeCandidate({ ticker: 'A', shares: 4000, price: 20, cost: 64000, tier: 2, annualDividend: 4000 })];
+    const sales = [sale({ date: '2026-09-11', ticker: 'A', shares: 1000, netProceeds: 29000, cost: 16000, realizedPL: 13000 })];
+    const { plan } = reviveScenario(scenario([{ ticker: 'A', sellShares: 1400 }]), candidates, { discount: 1.0, sales });
+    const s = summarize(plan, candidates);
+
+    expect(s.remaining.value).toBeCloseTo((4000 - 400) * 20, 6); // only the live row's 400 leave the holding
+    const live = plan.rows.find(r => !r.sold);
+    expect(s.taxAndFees).toBeCloseTo(live.tax + live.fee, 6); // the sold row's net already has them deducted
+    expect(s.realizedPL).toBeCloseTo(13000 + live.realizedPL, 6);
+  });
+
+  it('editing Sell Shares changes the live row and leaves the sold row alone', () => {
+    const candidates = [makeCandidate({ ticker: 'A', shares: 5000, price: 20, cost: 80000 })];
+    const sales = [sale({ date: '2026-09-11', ticker: 'A', shares: 1000, netProceeds: 29000 })];
+    const { plan } = reviveScenario(scenario([{ ticker: 'A', sellShares: 1400 }]), candidates, { sales });
+    const edited = editSellShares(plan, candidates, 'A', 700);
+
+    expect(edited.rows.find(r => r.sold)).toMatchObject({ sellShares: 1000, net: 29000 });
+    expect(edited.rows.find(r => !r.sold).sellShares).toBe(700);
+  });
+
+  it('saving a loaded plan writes only what is still planned, not what already sold', () => {
+    const candidates = [makeCandidate({ ticker: 'A', shares: 5000, price: 20, cost: 80000 })];
+    const sales = [sale({ date: '2026-09-11', ticker: 'A', shares: 1000, netProceeds: 29000 })];
+    const { plan } = reviveScenario(scenario([{ ticker: 'A', sellShares: 1400 }]), candidates, { sales });
+    const saved = serializeScenario({ name: 'again', strategyId: 'custom', locked: [], plan });
+
+    expect(saved.rows).toHaveLength(1);
+    expect(saved.rows[0]).toMatchObject({ ticker: 'A', sellShares: 400 });
+    expect(saved.netAtSave).toBeCloseTo(plan.rows.find(r => !r.sold).net, 6);
   });
 });
 

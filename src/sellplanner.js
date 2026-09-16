@@ -292,7 +292,11 @@ export function summarize(plan, candidates) {
   let remainingValue = 0, remainingAnnualDiv = 0, remainingTier1Value = 0;
 
   for (const row of plan.rows) {
-    const c = byTicker[row.ticker];
+    // A sold row (design.md §C.11/§C.13) never takes part in the remaining-
+    // portfolio figures, even when its ticker is still held: a loaded plan also
+    // carries a live row for that ticker, and that row accounts for what's left.
+    const live = byTicker[row.ticker];
+    const c = row.sold ? undefined : live;
 
     // A row can outlive its candidate — a scenario reloaded after the position
     // was actually sold (see sellplanner-ui.js reviveScenario) carries its
@@ -307,7 +311,7 @@ export function summarize(plan, candidates) {
     taxAndFees += row.tax + row.fee;
     soldValueTotal += row.gross;
     costBasisSold += row.gross - row.realizedPL;
-    if (c && c.tier === 1) soldValueTier1 += row.gross;
+    if (live && live.tier === 1) soldValueTier1 += row.gross;
     if (!c) continue;
 
     annualDividendGivenUp += c.annualDividend * row.sellPct;

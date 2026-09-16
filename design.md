@@ -521,20 +521,67 @@ and named in the panel's footnote. Per-ticker and total figures are never approx
 **Non-positive denominators yield `null`, never `Infinity`/`NaN`** — a ticker whose every purchase is
 still held has a derived sold cost of 0, so there is no percentage to report; it renders as `—`.
 
-**UI.** A 已賣出部位 card on `#sellplanner-panel` (`index.html`), rendered by `renderRealized()` in
-`sellplanner-ui.js`: a totals strip, a Date/Ticker/Shares/Net Proceeds/Realized P/L/Realized P/L %
-table defaulting to one row per sale newest-first, and a toggle to roll up per ticker (tagged
-全部賣出 / 部分賣出). Two placement rules follow from it being *history*, not a plan:
-
-- It is rendered **once at init**, never from a plan re-render. No strategy, discount, lock or
-  dividend-window change can alter what was already sold.
-- It renders **above the C.5 offline block**, not behind it. C.5 suppresses the planner offline
-  because a plan priced off purchase prices would be plausible and wrong; realized sales need no
-  live price at all, so withholding settled history when the market is unreachable would be a
-  pointless loss of information.
+**UI — superseded by §C.13.** Rev 4.4 shipped this as a separate 已賣出部位 card listing every sale
+in the ledger. That answered the wrong question: the user wanted a *loaded scenario* to show what
+actually became of it, in the Plan detail table itself. The card is removed; `realizedSales` stays as
+the source of per-sale figures that §C.13 matches against a scenario.
 
 `initSellPlanner`'s ctx gains `trades` and `lots` (`src/app.js`), both already loaded for the
 dashboard. No Sheet schema change, no `gas/Code.js` change, no redeploy.
+
+---
+
+### C.13 A loaded scenario shows what actually happened to it (amendment, 2026-09-16)
+
+§C.11 made a loaded scenario keep its since-sold rows, frozen at the figures saved with the plan. In
+practice there are no such figures to show: every scenario in the SellPlans tab predates §C.11, and
+the deployed Apps Script (still the §C.10-era `validateScenario_`) strips the extra per-row fields on
+save anyway. So each sold row rendered as "not recorded" with zero proceeds, and the loaded plan's
+totals silently left out exactly the part that had been carried out.
+
+**SP-26 — the executed part of a loaded plan comes from the ledger.** `attributeSales(scenario,
+sales)` (`sellplanner-ui.js`) takes `realizedSales(...).sales` and, per planned ticker, consumes the
+sales dated **on or after the day the plan was saved** oldest first, **up to the planned share
+count**:
+
+- *The day, in Taiwan.* Ledger dates are Taiwan calendar days; `savedAt` is a UTC instant, shifted
+  +8h (no DST) before comparing. The save day is inclusive — the market closes at 13:30, so an order
+  filled the same day was necessarily placed before an evening save.
+- *The cap.* A later plan can sell the same stock again; those sales belong to that plan. Without
+  the cap, an earlier plan planning a small lot would absorb every later sale of the ticker.
+- *Proration.* A sale only partly needed contributes `take / sale.shares` of its proceeds and cost —
+  both are linear in shares within one sale.
+- A sale with no share count cannot be apportioned and is skipped. An unparseable `savedAt` matches
+  nothing, never everything.
+
+**`reviveScenario(..., { sales })` splits each planned position** into what the matching found and
+what remains:
+
+| Planned position | Rows |
+|---|---|
+| fully executed | one sold row (`sold`, `actual`) at the real figures; if the ticker is still held (other lots), its live row plans 0 more |
+| partly executed | a sold row for what sold, **plus** a normal editable live row for the remainder, re-priced at today's market and clamped to holdings |
+| not executed | unchanged — a live row re-priced at today's market (SP-11) |
+
+A sold row's `net` is the real cash credited; `gross` carries the same figure and `tax`/`fee` are 0,
+because the ledger records only the net credit. `gross − realizedPL` still recovers the cost basis, so
+`summarize`'s plan-level Realized P/L % stays correct. Sold rows lead the table, marked
+`已賣出 <last sale date>`, read-only, with `≈` beside P/L when the ticker's share counts don't
+reconcile (§C.12). The progress card states how much of the total is actual and how much is estimate.
+Callers that omit `sales` get the §C.11 behaviour unchanged.
+
+**Consequences elsewhere, all following from "a sold row is history, not a plan":**
+
+- `summarize` never lets a sold row into the remaining-portfolio figures, even for a still-held
+  ticker — the live row beside it already accounts for what is left. Its tier still counts toward
+  the tier-1 share of the sale.
+- `editSellShares` edits only the live row when a ticker has both.
+- `serializeScenario` writes only live rows (and `netAtSave` is their total). A plan saved now is a
+  plan for what is still held, and its ledger matching starts from today, so an already-executed
+  sale can only ever belong to the plan that was loaded.
+- CSV export leaves a sold row's price blank rather than substituting today's.
+
+The separate §C.12 panel is removed. No Sheet schema change, no `gas/Code.js` change, no redeploy.
 
 ---
 

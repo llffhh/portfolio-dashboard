@@ -228,35 +228,12 @@
       </div>
 
       <div class="chart-container" style="margin-top: 20px;">
-        <h3>已賣出部位 — Realized sales</h3>
-        <p class="label" style="margin-bottom: 12px;">
-          What the ledger says you actually sold, not what a plan would raise. Net proceeds are the
-          real amount credited to the account, already net of tax and brokerage fee. Cost is what you
-          paid for the shares that left — for a part-sold lot, the rest stays charged to the shares
-          you still hold.
-        </p>
-        <div id="sp-realized-summary" class="grid" style="margin-bottom: 12px;"></div>
-        <button id="sp-realized-group" class="btn-toggle">Group by ticker</button>
-        <div style="overflow-x:auto; max-height: 520px; overflow-y:auto; margin-top: 12px;">
-        <table id="sp-realized-table">
-          <thead>
-            <tr>
-              <th>Date</th>
-              <th>Ticker</th>
-              <th>Shares</th>
-              <th>Net Proceeds</th>
-              <th>Realized P/L</th>
-              <th>Realized P/L %</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-        </div>
-        <p id="sp-realized-footnote" class="label" style="margin-top: 10px;"></p>
-      </div>
-
-      <div class="chart-container" style="margin-top: 20px;">
         <h3>Saved scenarios</h3>
+        <p class="label" style="margin-bottom: 8px;">
+          Loading a plan shows what actually happened to it: positions sold since it was saved appear
+          as 已賣出 rows with their real Net Proceeds and Realized P/L from the ledger (already net of
+          tax and fee); anything still unsold is re-priced at today's market.
+        </p>
         <button id="sp-save-scenario" class="btn-toggle">Save current plan as scenario</button>
         <div id="sp-scenario-status" class="label" style="margin:8px 0;"></div>
         <button id="sp-export-csv" class="btn-toggle">Export CSV</button>

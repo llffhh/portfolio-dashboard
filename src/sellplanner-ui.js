@@ -7,7 +7,7 @@ import {
   buildCandidates, proceeds, solveFill, summarize,
   tagTiered, yieldProtect, proportional, cutLosers,
   TARGET_NET, realizedSales
-} from './sellplanner.js?v=6';
+} from './sellplanner.js?v=7';
 
 export const SCENARIO_KEY = 'sellPlanner.scenarios.v1';
 export const SCENARIO_VERSION = 1;
@@ -53,14 +53,18 @@ function makeScenarioId() {
 // reload still re-prices at today's market; the saved figures exist so a
 // position that's since been fully sold has something to fall back to
 // instead of vanishing from the record (see reviveScenario below).
+// SP-26 (design.md §C.13): a sold row is not written back. A plan saved now is
+// a plan for what is still held, and its ledger matching starts from today, so
+// a sale that already happened can only belong to the plan that was loaded.
 export function serializeScenario({ name, strategyId, locked, plan, note }) {
+  const planned = plan.rows.filter(r => r.sellShares > 0 && !r.sold);
   return {
     id: makeScenarioId(),
     name,
     savedAt: new Date().toISOString(),
     strategyId,
     locked: locked || [],
-    rows: plan.rows.filter(r => r.sellShares > 0).map(r => ({
+    rows: planned.map(r => ({
       ticker: r.ticker,
       sellShares: r.sellShares,
       sellPct: r.sellPct ?? null,
@@ -73,7 +77,7 @@ export function serializeScenario({ name, strategyId, locked, plan, note }) {
       realizedPLPct: r.realizedPLPct ?? null
     })),
     note: note || '',
-    netAtSave: plan.totals.net
+    netAtSave: planned.reduce((s, r) => s + r.net, 0)
   };
 }
 
@@ -107,14 +111,83 @@ export function deleteScenario(id, storage = defaultStorage()) {
 // frozen at its save-time price and figures, never re-priced (there is
 // nothing left to re-price against). Callers that omit `heldTickers` get the
 // old, simpler behaviour of treating every candidate-absent row as sold.
+// The ledger's dates are Taiwan calendar days; savedAt is a UTC instant. Taiwan
+// has no daylight saving, so a fixed +8h gives the day the plan was saved on.
+function taipeiDay(iso) {
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? new Date(t + 8 * 3600 * 1000).toISOString().slice(0, 10) : null;
+}
+
+// SP-26 (design.md §C.13): which real sales carried out a saved plan.
+// For each planned ticker, the ledger's sales dated on or after the day the
+// plan was saved are consumed oldest first, up to the planned share count. The
+// cap matters: a later plan can sell the same stock again, and those sales
+// belong to that plan, not this one. A sale only partly needed is prorated —
+// proceeds and cost both scale linearly with shares within one sale.
+// `sales` is realizedSales(...).sales. A sale with no share count can't be
+// apportioned and is skipped.
+export function attributeSales(scenario, sales) {
+  const since = taipeiDay(scenario.savedAt);
+  const out = {};
+  if (!since || !Array.isArray(sales)) return out;
+  // Stable sort: same-day sales keep the ledger's own order.
+  const ordered = sales.filter(s => s.date >= since && s.shares > 0).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  for (const row of scenario.rows) {
+    if (out[row.ticker] || !(row.sellShares > 0)) continue;
+    let remaining = row.sellShares, net = 0, cost = 0, approx = false, lastDate = null;
+    for (const s of ordered) {
+      if (remaining <= 0) break;
+      if (s.ticker !== row.ticker) continue;
+      const take = Math.min(s.shares, remaining);
+      const frac = take / s.shares;
+      net += s.netProceeds * frac;
+      cost += s.cost * frac;
+      approx = approx || s.allocated;
+      lastDate = s.date;
+      remaining -= take;
+    }
+    const shares = row.sellShares - remaining;
+    if (shares > 0) {
+      out[row.ticker] = {
+        shares, net, cost,
+        realizedPL: net - cost,
+        realizedPLPct: cost > 0 ? ((net - cost) / cost) * 100 : null,
+        approx, lastDate
+      };
+    }
+  }
+  return out;
+}
+
+function actualSoldRow(ticker, a) {
+  // `gross` carries net: the ledger records only the cash actually credited, so
+  // no tax or fee is split out, and gross − realizedPL still recovers the cost
+  // basis that summarize() needs for the plan-level percentage.
+  return {
+    ticker, sellShares: a.shares, sellPct: null,
+    gross: a.net, tax: 0, fee: 0, net: a.net,
+    realizedPL: a.realizedPL, realizedPLPct: a.realizedPLPct,
+    price: null, sold: true, actual: true, approx: a.approx, soldDate: a.lastDate
+  };
+}
+
 export function reviveScenario(scenario, candidates, opts = {}) {
   const discount = opts.discount ?? 1.0;
   const byTicker = Object.fromEntries(candidates.map(c => [c.ticker, c]));
   const heldTickers = opts.heldTickers;
+  // SP-26 (design.md §C.13): with the ledger's sales supplied, the executed part
+  // of each planned position is shown at its real figures and only the unsold
+  // remainder is re-priced at today's market.
+  const actual = opts.sales ? attributeSales(scenario, opts.sales) : {};
+  const soldRows = [];
   const rows = [];
+  for (const saved of scenario.rows) {
+    if (actual[saved.ticker]) soldRows.push(actualSoldRow(saved.ticker, actual[saved.ticker]));
+  }
   for (const c of candidates) {
     const saved = scenario.rows.find(r => r.ticker === c.ticker);
-    const sellShares = saved ? Math.min(saved.sellShares, c.shares) : 0;
+    const stillPlanned = saved ? saved.sellShares - (actual[c.ticker]?.shares || 0) : 0;
+    const sellShares = Math.max(0, Math.min(stillPlanned, c.shares));
     const p = proceeds(sellShares, c.price, { discount });
     const costPerShare = c.shares > 0 ? c.cost / c.shares : 0;
     const realizedPL = sellShares * (c.price - costPerShare);
@@ -130,8 +203,9 @@ export function reviveScenario(scenario, candidates, opts = {}) {
       sold: false
     });
   }
+  rows.unshift(...soldRows);
   for (const saved of scenario.rows) {
-    if (byTicker[saved.ticker]) continue;
+    if (byTicker[saved.ticker] || actual[saved.ticker]) continue;
     if (heldTickers && heldTickers.has(saved.ticker)) continue; // still held, just excluded from planning right now
     if (saved.price == null) {
       // Pre-amendment scenario: no historical price was ever saved for it.
@@ -191,7 +265,9 @@ export function editSellShares(plan, candidates, ticker, newShares, opts = {}) {
     realizedPLPct: costBasisSold > 0 ? (realizedPL / costBasisSold) * 100 : 0
   };
 
-  const rows = plan.rows.map(r => (r.ticker === ticker ? newRow : r));
+  // A loaded plan can hold a sold row and a live row for the same ticker; only
+  // the live one is editable.
+  const rows = plan.rows.map(r => (r.ticker === ticker && !r.sold ? newRow : r));
   const totals = rows.reduce((acc, r) => ({
     gross: acc.gross + r.gross, tax: acc.tax + r.tax, fee: acc.fee + r.fee,
     net: acc.net + r.net, realizedPL: acc.realizedPL + r.realizedPL
@@ -216,7 +292,7 @@ export function buildCsv(plan, candidates) {
     .filter(r => r.sellShares > 0)
     .map(r => {
       const c = byTicker[r.ticker] || {};
-      const price = r.price ?? c.price ?? '';
+      const price = r.sold ? (r.price ?? '') : (r.price ?? c.price ?? '');
       return [r.ticker, c.code || '', r.sellShares, price, r.gross.toFixed(2), r.tax.toFixed(2), r.fee.toFixed(2), r.net.toFixed(2), r.realizedPL.toFixed(2)].join(',');
     });
   return [header, ...lines].join('\n');
@@ -333,6 +409,16 @@ const STRATEGY_FNS = { tagTiered, yieldProtect, proportional, cutLosers };
 
 function fmt(n) { return Math.round(n).toLocaleString(); }
 
+// Splits a loaded plan's total into what the ledger shows was really sold and
+// what is still only an estimate at today's prices.
+function soldNote(plan) {
+  const sold = plan.rows.filter(r => r.actual);
+  if (!sold.length) return '';
+  const soldNet = sold.reduce((s, r) => s + r.net, 0);
+  const soldPL = sold.reduce((s, r) => s + r.realizedPL, 0);
+  return `<div class="label">Of this, ${fmt(soldNet)} (${soldPL >= 0 ? '+' : ''}${fmt(soldPL)} P/L) was actually sold across ${sold.length} position(s) — real ledger figures; the remaining ${fmt(plan.totals.net - soldNet)} is estimated at today's prices.</div>`;
+}
+
 // DOM entry point (C.4). `ctx = { holdings, priceMap, priceToday, divs,
 // reviewLots, offline }`. Segment map is fetched at runtime (no build step,
 // no import assertion) rather than imported, keeping sellplanner.js pure.
@@ -366,11 +452,6 @@ export async function initSellPlanner(ctx) {
     noticeBox.classList.add('visible');
     noticeList.innerHTML += `<li>${msg}</li>`;
   }
-
-  // SP-25 (design.md §C.12): realized sales are settled ledger history — they
-  // need no live price, so they render above the C.5 offline block rather than
-  // behind it. What was sold is a fact whether or not the market is reachable.
-  renderRealized();
 
   // C.5: offline block — a plausible-looking wrong plan is worse than none.
   if (ctx.offline) {
@@ -409,6 +490,9 @@ export async function initSellPlanner(ctx) {
   // just excluded right now" from "actually sold since this scenario was
   // saved" when a loaded scenario's row has no live candidate to match.
   const heldTickers = new Set(Object.keys(ctx.holdings || {}));
+  // SP-26 (design.md §C.13): the ledger's real sales, matched against a loaded
+  // scenario so its executed positions show what actually happened.
+  const ledgerSales = realizedSales(ctx.trades, ctx.lots).sales;
 
   function recomputeCandidates() {
     const { candidates: all, excluded } = buildCandidates(ctx.holdings, ctx.priceMap, ctx.priceToday, ctx.divs, segmentMap, { dividendYears });
@@ -548,10 +632,10 @@ export async function initSellPlanner(ctx) {
         <table style="box-shadow:none;font-size:13px;"><tbody>`;
       for (const r of rows) {
         const pct = (r.gross / totalGross) * 100;
-        const whole = r.sellShares >= r.shares;
+        const whole = !r.sold && r.sellShares >= r.shares;
         html += `<tr>
           <td style="padding:4px 0;border:none;">${r.ticker}<span class="label"> ${r.segment}</span></td>
-          <td style="padding:4px 0;border:none;">${r.sellShares.toLocaleString()} sh${whole ? ' (all)' : ''}</td>
+          <td style="padding:4px 0;border:none;">${r.sellShares.toLocaleString()} sh${r.sold ? ' (已賣出)' : whole ? ' (all)' : ''}</td>
           <td style="padding:4px 0;border:none;">${fmt(r.gross)}</td>
           <td style="padding:4px 0;border:none;font-weight:600;">${pct.toFixed(1)}%</td>
         </tr>`;
@@ -570,6 +654,7 @@ export async function initSellPlanner(ctx) {
         <div style="background:${activePlan.feasible ? '#16a34a' : '#f59e0b'};width:${pct}%;height:100%;"></div>
       </div>
       <div class="label">${fmt(activePlan.totals.net)} / ${fmt(TARGET_NET)} net raised (${pct.toFixed(1)}%)</div>
+      ${soldNote(activePlan)}
       <div class="grid" style="margin-top:16px;">
         <div><div class="label">Realized P/L on this plan</div><div class="value" style="font-size:18px;">${sum.realizedPL >= 0 ? '+' : ''}${fmt(sum.realizedPL)} (${sum.realizedPLPct >= 0 ? '+' : ''}${sum.realizedPLPct.toFixed(1)}%)</div></div>
         <div><div class="label">Annual dividend given up (approx.)</div><div class="value" style="font-size:18px;">−${fmt(sum.annualDividendGivenUp)}</div></div>
@@ -589,22 +674,25 @@ export async function initSellPlanner(ctx) {
     for (const row of activePlan.rows) {
       const c = byTicker[row.ticker];
       const tr = document.createElement('tr');
-      if (!c) {
-        // SP-11 amendment (design.md §C.11): a loaded scenario's row for a
-        // position actually sold since — no live candidate to re-price
-        // against. Shown frozen at its save-time price/figures, read-only.
+      if (row.sold || !c) {
+        // A loaded scenario's sold row, read-only. With `actual` (§C.13) its
+        // figures are the ledger's real sales; otherwise (§C.11) they are
+        // whatever was saved with the plan.
         const priceCell = row.price != null ? fmt(row.price) : (row.priceMissing ? '<span class="label">not recorded</span>' : '—');
         const plPctCell = (row.realizedPLPct !== undefined && row.realizedPLPct !== null)
           ? `${row.realizedPLPct >= 0 ? '+' : ''}${row.realizedPLPct.toFixed(1)}%` : '—';
+        const tag = row.actual ? `已賣出 ${esc(row.soldDate)}` : '已賣出';
+        const approx = row.approx ? ' <span class="label" title="share counts for this stock do not reconcile (e.g. 配股), so its cost is split at the average per share">≈</span>' : '';
+        tr.style.background = '#f9fafb';
         tr.innerHTML = `
           <td></td>
-          <td>${row.ticker} <span class="label">已賣出</span></td>
+          <td>${esc(row.ticker)} <span class="label">${tag}</span></td>
           <td>${priceCell}</td>
           <td>—</td>
           <td>—</td>
           <td>${row.sellShares.toLocaleString()}</td>
           <td>${fmt(row.net)}</td>
-          <td>${row.realizedPL >= 0 ? '+' : ''}${fmt(row.realizedPL)}</td>
+          <td>${row.realizedPL >= 0 ? '+' : ''}${fmt(row.realizedPL)}${approx}</td>
           <td>${plPctCell}</td>
           <td>—</td>
         `;
@@ -674,7 +762,7 @@ export async function initSellPlanner(ctx) {
     scenarioList.innerHTML = scenarios.length ? '' : '<div class="label">No saved plans yet.</div>';
     for (const sc of scenarios) {
       const row = document.createElement('div');
-      const { plan, drift } = reviveScenario(sc, candidates, { discount, target: TARGET_NET, heldTickers });
+      const { plan, drift } = reviveScenario(sc, candidates, { discount, target: TARGET_NET, heldTickers, sales: ledgerSales });
       row.innerHTML = `
         <span>${esc(sc.name)} (saved ${esc(new Date(sc.savedAt).toLocaleDateString())}) — net now ${fmt(plan.totals.net)}${drift !== undefined ? ` (${drift >= 0 ? '+' : ''}${fmt(drift)} vs. save time)` : ''}</span>
         <button class="btn-toggle sp-load-scenario" data-id="${esc(sc.id)}">Load</button>
@@ -686,7 +774,7 @@ export async function initSellPlanner(ctx) {
       btn.addEventListener('click', () => {
         const sc = scenarios.find(s => s.id === btn.dataset.id);
         if (!sc) return;
-        const { plan } = reviveScenario(sc, candidates, { discount, target: TARGET_NET, heldTickers });
+        const { plan } = reviveScenario(sc, candidates, { discount, target: TARGET_NET, heldTickers, sales: ledgerSales });
         customPlan = plan;
         customClearedByLock = false;
         activePlan = plan;
@@ -709,83 +797,6 @@ export async function initSellPlanner(ctx) {
         renderScenarios();
       });
     });
-  }
-
-  // SP-25 (design.md §C.12): realized sales — actual executed trades from the
-  // ledger. Independent of every planning control on this tab.
-  function renderRealized() {
-    const summaryEl = document.getElementById('sp-realized-summary');
-    const realizedBody = document.querySelector('#sp-realized-table tbody');
-    const footnoteEl = document.getElementById('sp-realized-footnote');
-    const groupBtn = document.getElementById('sp-realized-group');
-    if (!realizedBody) return;
-
-    const r = realizedSales(ctx.trades, ctx.lots);
-    let grouped = false;
-
-    const pct = (v) => v === null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
-    const signed = (v) => v === null ? '—' : `${v >= 0 ? '+' : ''}${fmt(v)}`;
-
-    if (summaryEl) {
-      summaryEl.innerHTML = `
-        <div class="card"><div class="label">Total net proceeds</div><div class="value">${fmt(r.totals.netProceeds)}</div></div>
-        <div class="card"><div class="label">Cost of shares sold</div><div class="value">${fmt(r.totals.cost)}</div></div>
-        <div class="card"><div class="label">Realized P/L</div><div class="value">${signed(r.totals.realizedPL)}</div></div>
-        <div class="card"><div class="label">Realized P/L %</div><div class="value">${pct(r.totals.realizedPLPct)}</div></div>
-      `;
-    }
-
-    if (footnoteEl) {
-      const n = r.notices.unreconciled.length;
-      footnoteEl.textContent = n
-        ? `${r.sales.length} sales across ${r.byTicker.length} tickers. The cash figures above are exact. `
-          + `For ${n} ticker(s) the share counts do not reconcile — usually 配股 shares that arrived with no purchase behind them — `
-          + `so their per-sale split is an average and is marked ≈: ${r.notices.unreconciled.join(', ')}.`
-        : `${r.sales.length} sales across ${r.byTicker.length} tickers.`;
-    }
-
-    function draw() {
-      realizedBody.innerHTML = '';
-      if (!r.sales.length) {
-        realizedBody.innerHTML = '<tr><td colspan="6" class="label">No sales recorded in the ledger yet.</td></tr>';
-        return;
-      }
-      const rows = grouped
-        ? [...r.byTicker].sort((a, b) => b.netProceeds - a.netProceeds).map(t => ({
-            date: t.lastDate, ticker: t.ticker, shares: t.shares,
-            netProceeds: t.netProceeds, realizedPL: t.realizedPL, realizedPLPct: t.realizedPLPct,
-            approx: false, tag: t.fullyExited ? '全部賣出' : '部分賣出'
-          }))
-        : r.sales.map(s => ({
-            date: s.date, ticker: s.ticker, shares: s.shares,
-            netProceeds: s.netProceeds, realizedPL: s.realizedPL, realizedPLPct: s.realizedPLPct,
-            approx: s.allocated, tag: null
-          }));
-
-      for (const row of rows) {
-        const tr = document.createElement('tr');
-        const mark = row.approx ? ' <span class="label">≈</span>' : '';
-        const tag = row.tag ? ` <span class="label">${row.tag}</span>` : '';
-        tr.innerHTML = `
-          <td>${esc(row.date)}</td>
-          <td>${esc(row.ticker)}${tag}</td>
-          <td>${row.shares === null ? '—' : row.shares.toLocaleString()}</td>
-          <td>${fmt(row.netProceeds)}</td>
-          <td>${signed(row.realizedPL)}${mark}</td>
-          <td>${pct(row.realizedPLPct)}</td>
-        `;
-        realizedBody.appendChild(tr);
-      }
-    }
-
-    if (groupBtn) {
-      groupBtn.addEventListener('click', () => {
-        grouped = !grouped;
-        groupBtn.textContent = grouped ? 'Show every sale' : 'Group by ticker';
-        draw();
-      });
-    }
-    draw();
   }
 
   if (discountInput) {

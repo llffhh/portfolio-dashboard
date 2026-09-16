@@ -6,8 +6,8 @@ import {
   roi, xirr, simpleCagr, dividendsByYear, depositsByYear, yearlyPnL,
   portfolioValueOverTime, buildXirrCashflows, yieldOnCost
 } from './metrics.js?v=33';
-import { initSellPlanner } from './sellplanner-ui.js?v=9';
-import { annualDividendFor } from './sellplanner.js?v=6';
+import { initSellPlanner } from './sellplanner-ui.js?v=10';
+import { annualDividendFor } from './sellplanner.js?v=7';
 
 // Shares held per ticker as of a date (tolerant app-side variant of MET-9's
 // reconstruction — missing prices are skipped and surfaced, not thrown).
@@ -114,8 +114,8 @@ async function init() {
 
     // Rev 4.0 (design.md Section C): sell planner, wired to the same load —
     // offline = using MockPriceSource (buy prices only, C.5 blocking banner).
-    // SP-25 (design.md §C.12): `trades` + `lots` drive the realized-sales panel,
-    // which reports executed sales from the ledger rather than planned ones.
+    // SP-26 (design.md §C.13): `trades` + `lots` let a loaded scenario show the
+    // ledger's real figures for positions it has since sold.
     initSellPlanner({ holdings, priceMap, priceToday, divs, reviewLots, trades, lots,
       offline: priceSource instanceof MockPriceSource,
       // SP-21: live mode keeps saved plans in the Sheet so they follow you across devices.
