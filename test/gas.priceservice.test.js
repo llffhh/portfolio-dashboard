@@ -413,7 +413,7 @@ describe('Rev 4.7 — getQuotes_ (design.md §D.1/§D.3, T7)', () => {
     expect(urlCalls.some((u) => u.includes('8299.TWO'))).toBe(true);
     // isClosed (1445 Taipei) => settled TTL, capped at the 6h CacheService ceiling.
     // Cache key includes the (default) range — A2's named trap.
-    expect(cache._ttls['q_8299_1mo']).toBe(21600);
+    expect(cache._ttls['q_v2_8299_1mo']).toBe(21600);
   });
 
   it('caches a live (not-yet-closed) quote at the 300s TTL (§D.3)', () => {
@@ -421,7 +421,7 @@ describe('Rev 4.7 — getQuotes_ (design.md §D.1/§D.3, T7)', () => {
     const payload = yahooChart({ symbol: '2330.TW', sessionDate: today, sessionHHMM: '1000', closesByDate: { [today]: 900 } });
     const { ctx, cache } = loadGas({ urlResponses: { '2330.TW': payload } });
     ctx.getQuotes_({ '台積電': '2330' });
-    expect(cache._ttls['q_2330_1mo']).toBe(300);
+    expect(cache._ttls['q_v2_2330_1mo']).toBe(300);
   });
 
   it('a second call within TTL is served from cache, not a second fetch', () => {
@@ -503,15 +503,15 @@ describe('Rev 4.7 — getQuotes_ (design.md §D.1/§D.3, T7)', () => {
 
       ctx.getQuotes_({ '台積電': '2330' }, '1mo');
       expect(fetchAllCalls.length).toBe(1);
-      expect(cache._values['q_2330_1mo']).toBeDefined();
-      expect(cache._values['q_2330_1y']).toBeUndefined();   // NOT satisfied by the 1mo entry
+      expect(cache._values['q_v2_2330_1mo']).toBeDefined();
+      expect(cache._values['q_v2_2330_1y']).toBeUndefined();   // NOT satisfied by the 1mo entry
 
       fetchAllCalls.length = 0;   // reset — only care what the NEXT call does
       ctx.getQuotes_({ '台積電': '2330' }, '1y');
       // A DIFFERENT range for the SAME code must be a cache MISS — a fresh
       // fetchAll, not silently served from the '1mo' entry (A2's named trap).
       expect(fetchAllCalls.length).toBe(1);
-      expect(cache._values['q_2330_1y']).toBeDefined();
+      expect(cache._values['q_v2_2330_1y']).toBeDefined();
 
       // And the reverse holds too: a THIRD call at '1mo' is now served from
       // the (still-present) '1mo' cache entry, unaffected by the '1y' fetch.
@@ -529,7 +529,61 @@ describe('Rev 4.7 — getQuotes_ (design.md §D.1/§D.3, T7)', () => {
       };
       const { ctx, cache } = loadGas({ sheets, urlResponses: { '2330.TW': payload } });
       ctx.getPricesFromSheet([], []);
+      expect(cache._values['q_v2_2330_1mo']).toBeDefined();
+    });
+  });
+
+  describe('A7 — cache key carries a schema version (design.md §D.3 amendment, Phase 4 post-deploy fix)', () => {
+    it('quoteCacheKey_ embeds the version constant, exactly matching what getQuotes_ actually writes', () => {
+      const { ctx } = loadGas();
+      expect(ctx.quoteCacheKey_('2330', '1mo')).toBe('q_v2_2330_1mo');
+      expect(ctx.quoteCacheKey_('2330', '1mo')).toContain(ctx.QUOTE_CACHE_SCHEMA_VERSION);
+    });
+
+    it('a bundle cached under the OLD unversioned key is never read by the new code — always a fresh fetch', () => {
+      const today = todayTaipei();
+      const staleV1 = { sessionDate: today, isClosed: true, closes: { [today]: 111 } };   // pre-A5 shape: no phantomDropped
+      const freshPayload = yahooChart({ symbol: '2330.TW', sessionDate: today, sessionHHMM: '1445', closesByDate: { [today]: 600 } });
+      const { ctx, cache, fetchAllCalls } = loadGas({ urlResponses: { '2330.TW': freshPayload } });
+
+      // Seed the cache exactly as the PRE-A7 code would have keyed it.
+      cache.put('q_2330_1mo', JSON.stringify(staleV1), 21600);
+
+      const out = ctx.getQuotes_({ '台積電': '2330' }, '1mo');
+
+      // The old key is still sitting there, untouched (no migration/cleanup, per spec)...
       expect(cache._values['q_2330_1mo']).toBeDefined();
+      // ...but it was never read: a real fetchAll happened, and the result is
+      // the FRESH value, not the stale 111 a v1-key read would have returned.
+      expect(fetchAllCalls.length).toBe(1);
+      expect(out['台積電'].closes[today]).toBe(600);
+      expect(out['台積電'].closes[today]).not.toBe(111);
+      // The new call wrote under the VERSIONED key, not the old one.
+      expect(cache._values['q_v2_2330_1mo']).toBeDefined();
+    });
+
+    it('the range separation A2 established still holds under the versioned key (v2_..._1mo vs v2_..._1y)', () => {
+      const today = todayTaipei();
+      const payload = yahooChart({ symbol: '2330.TW', sessionDate: today, sessionHHMM: '1445', closesByDate: { [today]: 600 } });
+      const { ctx, cache, fetchAllCalls } = loadGas({ urlResponses: { '2330.TW': payload } });
+
+      ctx.getQuotes_({ '台積電': '2330' }, '1mo');
+      expect(cache._values['q_v2_2330_1mo']).toBeDefined();
+      expect(cache._values['q_v2_2330_1y']).toBeUndefined();
+
+      fetchAllCalls.length = 0;
+      ctx.getQuotes_({ '台積電': '2330' }, '1y');
+      expect(fetchAllCalls.length).toBe(1);   // still a fresh fetch, not served from the 1mo entry
+      expect(cache._values['q_v2_2330_1y']).toBeDefined();
+    });
+
+    it('bumping the version constant changes the key — proves the version is load-bearing, not decorative', () => {
+      const { ctx } = loadGas();
+      const original = ctx.quoteCacheKey_('2330', '1mo');
+      ctx.QUOTE_CACHE_SCHEMA_VERSION = 'v3';   // simulate a future bump
+      const bumped = ctx.quoteCacheKey_('2330', '1mo');
+      expect(bumped).not.toBe(original);
+      expect(bumped).toBe('q_v3_2330_1mo');
     });
   });
 });
@@ -821,8 +875,8 @@ describe('Rev 4.7 — backfillDailySnapshots upsert-only (design.md §D.7, T6)',
 
       // Cached under the WIDE range, not the '1mo' every other consumer uses —
       // proves the range was actually threaded through, not silently dropped.
-      expect(cache._values['q_2330_1mo']).toBeUndefined();
-      expect(cache._values['q_2330_1y']).toBeDefined();
+      expect(cache._values['q_v2_2330_1mo']).toBeUndefined();
+      expect(cache._values['q_v2_2330_1y']).toBeDefined();
       expect(logs.some((l) => l.includes('range=1y'))).toBe(true);
     });
 
@@ -841,7 +895,7 @@ describe('Rev 4.7 — backfillDailySnapshots upsert-only (design.md §D.7, T6)',
       };
       const { ctx, cache } = loadGas({ sheets, urlResponses: { '2330.TW': payload } });
       ctx.backfillDailySnapshots(threeDaysAgo);
-      expect(cache._values['q_2330_5d']).toBeDefined();
+      expect(cache._values['q_v2_2330_5d']).toBeDefined();
     });
 
     it('a requested window wider than what Yahoo actually returned is reported loudly, not silently shorter', () => {

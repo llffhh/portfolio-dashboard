@@ -945,3 +945,95 @@ on both `gas/Code.js` and `gas/deploy.mjs`.
 
 **Files changed this iteration:** `gas/Code.js`, `test/gas.priceservice.test.js`,
 `gas/deploy.mjs`, `task.md` (this section). Nothing else.
+
+### A7 — quote cache key has no schema version (design defect, §D.3)
+
+`quoteCacheKey_` is `'q_' + code + '_' + range` (gas/Code.js:536). It carries no
+code/schema version, so **a deploy does not invalidate bundles parsed by the
+previous code.** With `isClosed` true the TTL is capped at `PRICE_CACHE_MAX_TTL`
+(21600s = 6h), so post-deploy the endpoint can keep serving old-logic bundles
+for up to six hours.
+
+Observed 2026-09-21 00:20 Taipei, after the Rev 4.7.1 deploy: the endpoint still
+returned `sessionDate 2026-09-20` (the phantom date) and a zero delta, while the
+same deployed parser run against a live Yahoo payload in a Node sandbox correctly
+returned `sessionDate 2026-09-18`, current 2460, prevClose 2425. Same code, two
+answers — the endpoint was serving Rev 4.7 bundles out of CacheService.
+
+This is an Architect miss: §D.3 specified the TTL policy but not cache-key
+versioning, so any future change to `parseQuoteResponse_` has the same problem.
+
+Fix: include a schema version in the key (`q_v2_<code>_<range>`), bumped whenever
+the bundle shape or parse logic changes. Cheap, and it makes deploys of parse
+changes take effect immediately instead of up to 6h later.
+
+### Iteration 4 — 2026-09-21 (Phase 4 fix-forward: A7 cache-key versioning)
+**Triggered by:** coordinator message after the Rev 4.7.1 deploy's cache-key
+finding (A7, §D.3 amendment, Architect fault — the TTL policy never specified
+key versioning). User approved fixing forward. **Not deployed, not
+committed** — HEAD stays at `2422181`; `design.md` was read only, never
+edited, per the explicit constraint.
+
+**Constant name and value:** `QUOTE_CACHE_SCHEMA_VERSION = 'v2'`, declared in
+`gas/Code.js` right next to `PRICE_CACHE_LIVE_TTL`/`PRICE_CACHE_MAX_TTL` (same
+block, same section), with a comment naming exactly when to bump it (any
+change to `parseQuoteResponse_`'s logic or the QuoteBundle shape) and why v2
+specifically (the 4.7.1 fix already changed the shape by adding
+`phantomDropped`, so every bundle cached under the old unversioned key —
+retroactively "v1" — is a genuinely different shape and must not be read).
+`quoteCacheKey_(code, range)` now returns `'q_' + QUOTE_CACHE_SCHEMA_VERSION +
+'_' + code + '_' + range` — `range` stays exactly where the A2 fix put it, in
+the same relative position, so that fix is not regressed, only extended.
+
+**No migration/cleanup code was written**, per the explicit instruction — old
+unversioned entries are simply never looked up again by the new key format
+and expire on their own via their existing TTL.
+
+**Tests (new `describe('A7 — cache key carries a schema version ...')`
+block, 4 tests):**
+- `quoteCacheKey_` returns exactly `'q_v2_2330_1mo'` for `('2330','1mo')`, and
+  the returned string contains `QUOTE_CACHE_SCHEMA_VERSION` literally (not
+  just a coincidentally-matching substring — the constant is read off the
+  sandbox `ctx` and checked with `.toContain`).
+- **The one the coordinator asked for by name:** seeded the fake cache with an
+  entry under the OLD unversioned key (`q_2330_1mo`) holding a shape without
+  `phantomDropped` (a stand-in for a genuine pre-A5 v1 bundle) and a
+  deliberately-wrong stale price (111). Called `getQuotes_` with the SAME code
+  and range under the NEW code. Asserted: a real `fetchAll` still happened
+  (not served from the stale entry), the returned value is the FRESH price
+  (600), not the stale 111, and the old key is left sitting untouched in the
+  cache (proving no migration/cleanup ran) while the new versioned key now
+  holds the correct entry.
+- Re-ran the existing A2 range-separation scenario under the new key format
+  (`q_v2_..._1mo` vs `q_v2_..._1y`) to confirm range separation — the A2 fix —
+  still holds; this is in addition to, not a replacement for, the original A2
+  test (which was updated in place to expect the `v2`-prefixed key, since it
+  was asserting the literal key string).
+- Bumping `QUOTE_CACHE_SCHEMA_VERSION` to `'v3'` on the live sandbox context
+  and calling `quoteCacheKey_` again produces a DIFFERENT key
+  (`q_v3_2330_1mo`) — proves the version is load-bearing in the key
+  construction, not a comment-only convention that could silently stop being
+  honoured.
+- The 6 pre-existing tests that asserted the literal old key string
+  (`q_2330_1mo` etc., predating A7) were updated in place to the versioned
+  form (`q_v2_2330_1mo`) — same assertions, same coverage, just the key format
+  they check against.
+
+**Full suite: 140/140 green** (136 before this round + 4 new A7 tests).
+`node --check gas/Code.js` clean.
+
+**What I would do differently about the key format, if asked (not changed —
+out of scope, this is a "your opinion" answer, not a deviation):** the version
+and range segments are both free-form strings joined by `_` with no
+delimiter guarding against a code or range value that itself contains an
+underscore. Ticker CODES are already validated 4-digit numerics upstream so
+that's not a real risk, and `range` only ever comes from
+`DEFAULT_QUOTE_RANGE`/`yahooRangeForDays_`'s fixed token set (never
+user-supplied), so this is not an active bug — but if the key ever gained a
+component from less-controlled input, a fixed-width or explicitly-delimited
+format (e.g. `q/v2/2330/1mo` or a JSON-encoded key) would be more robust than
+string concatenation. Not worth doing now; flagging only because the question
+was asked directly.
+
+**Files changed this iteration:** `gas/Code.js`, `test/gas.priceservice.test.js`,
+`task.md` (this section). `design.md` was read, not edited.

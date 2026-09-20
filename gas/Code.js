@@ -358,6 +358,19 @@ function getPricesFromSheet(tickers, dates) {
 var PRICE_CACHE_LIVE_TTL = 300;     // §D.3: seconds, while the session is open
 var PRICE_CACHE_MAX_TTL = 21600;    // CacheService's hard per-put ceiling (6h)
 
+// A7 (Phase 4 post-deploy fix, §D.3 amendment 2026-09-21 — Architect fault,
+// not a Coder bug): the cache key MUST carry a schema version. Without one, a
+// deploy doesn't invalidate bundles parsed by the PREVIOUS code, and since a
+// settled bundle's TTL is capped at PRICE_CACHE_MAX_TTL (6h), the endpoint can
+// keep serving old-logic values for hours after a fix goes live — exactly
+// what happened to the Rev 4.7.1 phantom-bar fix (A5): the deployed parser
+// was correct, but the live endpoint kept answering from a pre-fix cached
+// bundle for hours. Bump this whenever parseQuoteResponse_'s logic OR the
+// QuoteBundle shape changes — set to v2 here because the 4.7.1 fix already
+// changed the shape (added `phantomDropped`), so every bundle cached under v1
+// is a genuinely different shape and must never be read by this code.
+var QUOTE_CACHE_SCHEMA_VERSION = 'v2';
+
 // Pure (A5 — Phase 4 post-deploy fix, Architect fault per §D.1, not a Coder
 // bug): Yahoo appends a trailing bar dated the CURRENT day even on a
 // non-trading day, carrying the previous real session's close verbatim.
@@ -532,9 +545,11 @@ function yahooRangeForDays_(days) {
 // Pure: the CacheService key for one ticker's quote. MUST include `range` —
 // a `1mo` entry must never satisfy a `1y` request (Phase 3 audit finding A2's
 // named trap) or a backfill silently gets a month of history from a stale
-// live-lookup cache entry instead of the year it asked for.
+// live-lookup cache entry instead of the year it asked for. MUST also include
+// the schema version (A7, §D.3 amendment) — a bundle cached by an older parser
+// must never be read by this code, deploy to deploy.
 function quoteCacheKey_(code, range) {
-  return 'q_' + code + '_' + range;
+  return 'q_' + QUOTE_CACHE_SCHEMA_VERSION + '_' + code + '_' + range;
 }
 
 // Impure: one batch of Yahoo `chart` fetches via UrlFetchApp.fetchAll (Phase 3

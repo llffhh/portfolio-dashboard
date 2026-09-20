@@ -701,6 +701,19 @@ During the session they legitimately differ — `closes[sessionDate]` is the liv
 
 Explicit and bounded, replacing Sheets' opaque custom-function cache.
 
+**Cache key carries a schema version** (added 2026-09-21 after A7):
+`q_v<N>_<code>_<range>`. `N` is bumped whenever `parseQuoteResponse_`'s logic or
+the QuoteBundle shape changes. Without it a deploy does not invalidate bundles
+parsed by the *previous* code, and because a settled bundle's TTL is capped at
+6 h, the endpoint can keep serving old-logic values for hours after a fix goes
+live — which is exactly what happened to the Rev 4.7.1 phantom-bar fix: the
+deployed parser was correct, the endpoint still returned the pre-fix
+`sessionDate` and a zero delta from cache.
+
+The range is already in the key (Phase 3 finding A2, so a narrow cached entry
+cannot satisfy a wider request); the version closes the same class of bug across
+time rather than across callers.
+
 ### D.4 Consumers
 
 | Consumer | Reads |
