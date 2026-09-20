@@ -115,7 +115,7 @@ interface DataSource {
 interface PriceSource { getPrices(tickers: string[], dates?: string[]): Promise<PriceMap> }
 ```
 - **`MockPriceSource`** (tests): deterministic from fixture.
-- **`AppsScriptPriceSource`** (live): `GET {WEBAPP_URL}?resource=prices&tickers=..[&dates=..]` → `PriceMap`. Reads `Prices` tab using `=GOOGLEFINANCE("TPE:"&code)` (current) and `GOOGLEFINANCE("TPE:"&code,"close",date)` (year-end). Transport/upstream failure ⇒ `E_PRICE_FETCH`; unknown ticker omitted (→ `E_NO_PRICE` if held).
+- **`AppsScriptPriceSource`** (live): `GET {WEBAPP_URL}?resource=prices&tickers=..[&dates=..]` → `PriceMap`. Reads the `Prices` tab for the ticker -> code map and the year-end close columns; current + prevClose come from `getQuotes_` (Yahoo chart endpoint) as of Rev 4.7 -- see Section D. **Superseded:** before Rev 4.7 this read the tab's `price`/`closeyest` formula columns. Those were `GET_TAIWAN_STOCK_PRICE` (a custom function), NOT `GOOGLEFINANCE` as this line previously stated -- which is exactly why their values were opaquely cached (Section D.0). Transport/upstream failure ⇒ `E_PRICE_FETCH`; unknown ticker omitted (→ `E_NO_PRICE` if held).
 
 ### A.6 API / data-transfer layer — Google Apps Script Web App
 - Deployment: `doGet(e)`, **Execute as owner**, access **"Anyone with a Google account"** (NOT anonymous — B.3.1). Returns `application/json`.
@@ -638,6 +638,117 @@ and paste over column D. Rules:
   is covered.
 
 ---
+
+## Section D — Rev 4.7 Unified price service (Phase 1, proposed 2026-09-20)
+
+### D.0 Problem
+
+Three consumers read three different price surfaces:
+
+| Consumer | Surface today | Freshness |
+|---|---|---|
+| Current Value card | `Prices!price` cell | cached custom-function result, unbounded age |
+| Yesterday Value card | `Prices!closeyest` cell | same |
+| DailyHistory — trigger | the same two cells, via `getValues()` | same; custom functions never execute in trigger context |
+| DailyHistory — backfill | Yahoo `chart` daily bars, fetched live | fresh, but a different field at a different instant |
+
+`GET_TAIWAN_STOCK_PRICE` is a **custom function**. Sheets caches its result, refreshes it on no timer, and does not run it from a trigger. So the value `recordDailySnapshot` writes is whatever the cell happened to hold — its age invisible and unbounded. Moving the trigger later does not help: the trigger *reads a cell*, it does not fetch. This is the defect reported 2026-09-20.
+
+### D.1 Contract — `getQuotes_(codes)`
+
+One Yahoo `chart` request per ticker. Every figure derives from that one response.
+
+```
+QuoteBundle = {
+  [ticker]: {
+    code:        string,        // 4-digit, zero-padded
+    symbol:      string,        // "2330.TW" | "8299.TWO" — whichever resolved
+    sessionDate: 'YYYY-MM-DD',  // from meta.regularMarketTime, in sheet tz
+    isClosed:    boolean,       // that timestamp's Taipei time-of-day >= 13:30
+    closes:      { 'YYYY-MM-DD': number }   // indicators.quote[0].close, nulls dropped
+  }
+}
+```
+
+**All three figures are read out of `closes`. No `meta` price field is ever used.**
+
+```
+current   = closes[sessionDate]
+prevClose = closes[ latest date strictly before sessionDate ]
+history   = closes
+```
+
+*Verified 2026-09-20:* `meta.regularMarketPrice === closes[sessionDate]` exactly for 2330.TW, 2303.TW, 3037.TW, 8299.TWO, 3260.TWO — reading the array loses nothing.
+
+*Verified 2026-09-20:* `meta.chartPreviousClose` is **range-dependent** and must not be used for Yesterday Value. 2303.TW returned 147.5 / 143 / 142.5 for no-params / `range=10d` / `range=5d`, against a true previous close of 147.5. `meta.previousClose` is absent whenever range params are passed. The present `closeyest` path (`gas/Code.js:359`) is correct only by accident of being called without range params; folding it into a ranged request would silently corrupt it.
+
+### D.2 Invariant (the requirement)
+
+> **After the close, Current Value === today's DailyHistory row.**
+
+Holds by construction: both are `closes[sessionDate]` of the same bundle.
+
+During the session they legitimately differ — `closes[sessionDate]` is the live in-progress bar (user's choice 2026-09-20: live intraday). While `isClosed` is false the card carries an "intraday — today's close not yet settled" note, so the difference from the chart is self-explaining.
+
+### D.3 Caching
+
+`CacheService.getScriptCache()`, one entry per ticker (never one blob — 100 KB per key limit).
+
+| State | TTL |
+|---|---|
+| `isClosed === false` | 300 s — live enough for the card, bounds Yahoo calls |
+| `isClosed === true` | until 08:00 next Taipei day — a settled close does not change |
+
+Explicit and bounded, replacing Sheets' opaque custom-function cache.
+
+### D.4 Consumers
+
+| Consumer | Reads |
+|---|---|
+| `?resource=prices` | `current` under `sessionDate`, `prevClose` under reserved key `closeyest` |
+| Current Value card | unchanged code path, now fed fresh values |
+| Yesterday Value card | unchanged code path |
+| `recordDailySnapshot` | `closes[sessionDate]`, gated on `isClosed` |
+| `backfillDailySnapshots` | `closes`, upsert-only |
+
+The PriceMap wire contract (§A.5) is **unchanged** — this is a backend swap, so `src/` needs no change beyond the D.2 intraday note.
+
+### D.5 `Prices` tab role
+
+Becomes the **ticker → code map**, plus the existing year-end columns (which still feed the Yearly chart, untouched). The `price` and `closeyest` formula columns are no longer read by anything. `GET_TAIWAN_STOCK_PRICE` stays in the file as a user-facing custom function, but nothing in the pipeline depends on it.
+
+### D.6 Data gap — codes (blocking, user action)
+
+Yahoo coverage tested against all 51 Prices rows, 2026-09-20:
+
+- **39 of 39 tickers that have a code resolved. No Yahoo failures.**
+- All 12 failures were `NO CODE IN SHEET` — a Prices-tab data gap, not a Yahoo gap.
+- Yahoo reaches TPEx via `.TWO`, which `GOOGLEFINANCE("TPE:"&code)` cannot: 威剛 3260, 波若威 3163, 群聯 8299 (held), plus 穩懋 3105, 藍新資訊 6938, 雙鴻 3324.
+
+Held tickers needing a code, resolved from the dividend 明細 per the Rev 3.3 rule and price-verified:
+
+| Ticker | Code | Source | Yahoo |
+|---|---|---|---|
+| 台達電 | 2308 | `現金股息2308台達電` | 2308.TW ✓ |
+| 友達 | 2409 | dividend record | 2409.TW ✓ |
+| 欣興 | 3037 | dividend record | 3037.TW ✓ |
+| 華邦電 | 2344 | **user-supplied 2026-09-20** | 2344.TW = Winbond Electronics ✓ |
+
+華邦電 had no dividend record, so no authoritative code. The user supplied 2344 on 2026-09-20; cross-checked before acceptance — Yahoo returns `longName` "Winbond Electronics Corporation" at a quoted price consistent with that holding's cost basis in the ledger. (Per-holding share counts and cost figures are deliberately omitted here — this repo is public; see the Rev 4.1 publish gotcha.) (友達 and 欣興 are absent from the Prices tab entirely, not merely code-less — they need new rows.)
+
+The nine code-less non-held tickers affect historical reconstruction only, which D.7 excludes.
+
+### D.7 Scope exclusions
+
+- **Existing DailyHistory rows are not touched** (user's choice 2026-09-20: fix forward). The chart marks where the method changed.
+- `backfillDailySnapshots` keeps working but **loses its `clear()`** — it upserts only dates having no row, so it can never again overwrite a recorded value.
+- Year-end history and the Yearly chart: unchanged.
+
+### D.8 Definition of Done (Phase 1 → Phase 2 gate)
+
+- [x] 華邦電 code supplied and verified: 2344 (2026-09-20).
+- [ ] User pastes the three verified codes into the Prices tab (D.6).
+- [x] Phase 1 approved 2026-09-20; `task.md` Rev 4.7 assignment handed to the Phase 2 coder.
 
 ## Verified figures (offline, from current ledger)
 | Quantity | Value |

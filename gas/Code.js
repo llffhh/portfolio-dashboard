@@ -262,9 +262,13 @@ function getPricesFromSheet(tickers, dates) {
   // throwing on `undefined.length`.
   tickers = tickers || [];
   dates = dates || [];
-  // Prices tab layout: ticker | code | price (current, GOOGLEFINANCE) | <date columns...>
-  // Returned PriceMap is keyed by ticker NAME (matches HeldLots/Trades), the 'price'
-  // column is keyed under today's date, and date-headed columns keep their date key.
+  // Rev 4.7 (design.md §D.5): Prices tab layout is now ticker | code | price
+  // | closeyest | <year-end date columns...>, but 'price'/'closeyest' are
+  // stale formula columns — NEVER read here. 'current' (under sessionDate)
+  // and 'prevClose' (under 'closeyest') come from getQuotes_ instead, so this
+  // is the same one Yahoo response every other consumer derives its figure
+  // from (§D.2 invariant). Year-end columns are untouched — they still feed
+  // the Yearly chart straight off the sheet.
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName('Prices');
   if (!sheet) throw new Error("No Prices sheet");
@@ -274,26 +278,38 @@ function getPricesFromSheet(tickers, dates) {
 
   // xlsx-converted spreadsheets can report a null timezone (seen in production)
   const tz = ss.getSpreadsheetTimeZone() || Session.getScriptTimeZone() || 'Asia/Taipei';
-  const today = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
   const headers = data[0];
   const priceMap = {};
+  const tickerCodeMap = {};   // ticker NAME -> code, fed to getQuotes_ below
+
+  // Phase 3 audit finding A1: a live quote is only ever needed for a
+  // CURRENTLY HELD ticker — Current Value, Yesterday Value, the holdings
+  // table and the Sell Planner all iterate HeldLots, and the Yearly chart's
+  // year-end prices come straight off the sheet (the loop below), never from
+  // getQuotes_. A ticker that was sold out still gets its year-end columns
+  // here; it just doesn't cost a live Yahoo fetch it can't use.
+  const heldTickers = getCurrentHoldings_(ss) || {};
 
   for (let i = 1; i < data.length; i++) {
     const row = data[i];
     if (row[0] === '' || row[0] == null) continue;
-    const name = row[0].toString();
-    const code = row[1] != null ? row[1].toString() : '';
+    // Ticker strings in this ledger carry stray trailing spaces (e.g. '台積電 ') —
+    // trim both sides, matching getCurrentHoldings_, or this row's live quote
+    // silently fails to line up with the holdings/HeldLots key and is dropped.
+    const name = row[0].toString().trim();
+    const code = row[1] != null ? row[1].toString().trim() : '';
     if (tickers.length > 0 && !tickers.includes(name) && !tickers.includes(code)) continue;
 
     priceMap[name] = {};
+    if (code && heldTickers[name] !== undefined) tickerCodeMap[name] = code;
+
     for (let j = 1; j < headers.length; j++) {
       let key = headers[j];
-      if (String(key).toLowerCase() === 'code') continue;
+      const keyLower = String(key).toLowerCase();
+      if (keyLower === 'code' || keyLower === 'price' || keyLower === 'closeyest') continue;
       // duck-typed Date check — `instanceof Date` is unreliable in the GAS V8 runtime
       if (key && typeof key.getTime === 'function') {
         key = Utilities.formatDate(key, tz, 'yyyy-MM-dd');
-      } else if (String(key).toLowerCase() === 'price') {
-        key = today;
       }
       if (dates.length === 0 || dates.includes(key)) {
         const v = row[j];
@@ -301,7 +317,274 @@ function getPricesFromSheet(tickers, dates) {
       }
     }
   }
+
+  // One Yahoo chart fetch per ticker (§D.1) feeds current + prevClose together,
+  // so Current Value and Yesterday Value always come from the same bundle.
+  const quotes = getQuotes_(tickerCodeMap);
+  const fetchErrors = [];
+  for (const name in tickerCodeMap) {
+    const bundle = quotes[name];
+    if (!bundle || bundle.error) {
+      // Never silently valued at 0 — the ticker's keys are simply absent, same
+      // as any other "no price for this ticker" case the UI already handles.
+      fetchErrors.push(name);
+      continue;
+    }
+    const current = currentOf(bundle);
+    if (current != null && (dates.length === 0 || dates.includes(bundle.sessionDate))) {
+      priceMap[name][bundle.sessionDate] = current;
+    }
+    const prev = prevCloseOf(bundle);
+    if (prev != null && (dates.length === 0 || dates.includes('closeyest'))) {
+      priceMap[name]['closeyest'] = prev;
+    }
+  }
+  if (fetchErrors.length > 0) {
+    Logger.log('getPricesFromSheet: quote fetch failed for: ' + fetchErrors.join(', '));
+  }
+
   return priceMap;
+}
+
+// ---------------------------------------------------------------------------
+// Rev 4.7 — Unified price service (design.md §D).
+//
+// One Yahoo `chart` request per ticker (§D.1). Current Value, Yesterday Value
+// and the DailyHistory snapshot all read out of the SAME `closes` array on the
+// SAME bundle, never a `meta` price field — `meta.chartPreviousClose` was
+// verified range-dependent (§D.1) and must never be used for Yesterday Value.
+// ---------------------------------------------------------------------------
+
+var PRICE_CACHE_LIVE_TTL = 300;     // §D.3: seconds, while the session is open
+var PRICE_CACHE_MAX_TTL = 21600;    // CacheService's hard per-put ceiling (6h)
+
+// Pure: builds a QuoteBundle from one already-fetched Yahoo `chart` JSON
+// payload. No network/Sheet access, so this is exercised directly in a Node
+// sandbox (test/gas.priceservice.test.js) against captured payloads.
+function parseQuoteResponse_(json, tz) {
+  var result = json && json.chart && json.chart.result && json.chart.result[0];
+  if (!result || !result.meta || !result.meta.regularMarketTime || !result.timestamp) return null;
+
+  var quote = result.indicators && result.indicators.quote && result.indicators.quote[0];
+  var closeArr = quote && quote.close;
+  if (!closeArr) return null;
+
+  var closes = {};
+  for (var i = 0; i < result.timestamp.length; i++) {
+    var c = closeArr[i];
+    if (c == null) continue;   // null closes dropped (T1)
+    var d = Utilities.formatDate(new Date(result.timestamp[i] * 1000), tz, 'yyyy-MM-dd');
+    closes[d] = c;
+  }
+
+  var sessionTs = new Date(result.meta.regularMarketTime * 1000);
+  var sessionDate = Utilities.formatDate(sessionTs, tz, 'yyyy-MM-dd');
+  // TWSE/TPEx close 13:30 Taipei; isClosed is ALWAYS judged on Taipei local
+  // time regardless of `tz` (the sheet's timezone) — the exchange doesn't
+  // move (T2).
+  var hhmm = Utilities.formatDate(sessionTs, 'Asia/Taipei', 'HHmm');
+  var isClosed = Number(hhmm) >= 1330;
+
+  return { sessionDate: sessionDate, isClosed: isClosed, closes: closes };
+}
+
+// Pure (T3): current = closes[sessionDate], per §D.1 — never meta.regularMarketPrice.
+function currentOf(bundle) {
+  return bundle && bundle.closes ? bundle.closes[bundle.sessionDate] : null;
+}
+
+// Pure (T4): prevClose = close of the latest date strictly before sessionDate.
+// Deliberately reads only `bundle.closes` — a QuoteBundle carries no `meta`
+// field at all, so there is nothing here that could accidentally reach
+// meta.chartPreviousClose (verified range-dependent, §D.1 — must never be used).
+function prevCloseOf(bundle) {
+  if (!bundle || !bundle.closes) return null;
+  var before = Object.keys(bundle.closes).filter(function (d) { return d < bundle.sessionDate; }).sort();
+  if (before.length === 0) return null;
+  return bundle.closes[before[before.length - 1]];
+}
+
+// Pure: close as of a given calendar date, walking back up to `maxLookback`
+// days to the latest trading day at-or-before it (weekends/holidays have no
+// entry in `closes`). Used by backfillDailySnapshots' historical reconstruction.
+function closeAsOf_(closes, dateStr, maxLookback) {
+  if (!closes) return null;
+  var base = Date.UTC(
+    Number(dateStr.slice(0, 4)), Number(dateStr.slice(5, 7)) - 1, Number(dateStr.slice(8, 10))
+  );
+  for (var lb = 0; lb <= maxLookback; lb++) {
+    var key = new Date(base - lb * 86400000).toISOString().slice(0, 10);
+    if (closes[key] !== undefined) return closes[key];
+  }
+  return null;
+}
+
+// Pure: normalizes a Prices-tab code cell the same way the old backfill loop did
+// (numeric cell -> string, zero-padded to 4 digits).
+function normalizeQuoteCode_(code) {
+  if (code == null || code === '') return '';
+  if (typeof code === 'number') code = code.toFixed(0);
+  code = String(code).trim();
+  if (code.length === 2) code = '00' + code;
+  if (code.length === 3) code = '0' + code;
+  return code;
+}
+
+// Pure given `now`: seconds from `now` until the next 08:00 Asia/Taipei,
+// capped to CacheService's 6-hour ceiling. A settled close is valid far
+// longer than that, but the cap costs nothing beyond one extra Yahoo request
+// after it expires — the next fetch re-derives the identical value.
+function secondsUntilNextTaipei8am_(now) {
+  var hh = Number(Utilities.formatDate(now, 'Asia/Taipei', 'HH'));
+  var mm = Number(Utilities.formatDate(now, 'Asia/Taipei', 'mm'));
+  var ss = Number(Utilities.formatDate(now, 'Asia/Taipei', 'ss'));
+  var sinceMidnight = hh * 3600 + mm * 60 + ss;
+  var untilEight = 8 * 3600 - sinceMidnight;
+  if (untilEight <= 0) untilEight += 86400;
+  return Math.min(untilEight, PRICE_CACHE_MAX_TTL);
+}
+
+// Default Yahoo `range` token when a caller doesn't need anything wider than
+// current + prevClose (§D.1's primary use). A completely bare request (no
+// params at all) was verified 2026-09-20 to return 1-MINUTE intraday bars for
+// a SINGLE day — every timestamp collapses onto today's date, so `closes`
+// never has an earlier date and prevCloseOf_ always returns null.
+// `range=1mo&interval=1d` returns ~21 real trading days of one-bar-per-day
+// closes plus a valid meta.regularMarketTime. D.1's "chartPreviousClose is
+// range-dependent" finding is about that META field specifically; it doesn't
+// apply here because nothing in this file ever reads
+// meta.chartPreviousClose/meta.previousClose/meta.regularMarketPrice — only
+// `closes`, per the hard constraint.
+var DEFAULT_QUOTE_RANGE = '1mo';
+
+// Ordered widest-enough Yahoo `range` token for a span of calendar days.
+// Pure — used by backfillDailySnapshots (Phase 3 audit finding A2) to request
+// only as much history as the caller's actual date window needs, instead of
+// every consumer being hardcoded to the same narrow default.
+function yahooRangeForDays_(days) {
+  var table = [[5, '5d'], [31, '1mo'], [93, '3mo'], [186, '6mo'], [366, '1y'], [731, '2y'], [1826, '5y']];
+  for (var i = 0; i < table.length; i++) if (days <= table[i][0]) return table[i][1];
+  return '10y';
+}
+
+// Pure: the CacheService key for one ticker's quote. MUST include `range` —
+// a `1mo` entry must never satisfy a `1y` request (Phase 3 audit finding A2's
+// named trap) or a backfill silently gets a month of history from a stale
+// live-lookup cache entry instead of the year it asked for.
+function quoteCacheKey_(code, range) {
+  return 'q_' + code + '_' + range;
+}
+
+// Impure: one batch of Yahoo `chart` fetches via UrlFetchApp.fetchAll (Phase 3
+// audit finding A1 — replaces N sequential UrlFetchApp.fetch calls with one
+// parallel round trip). Returns an array the same length/order as `symbols`;
+// an entry is the parsed QuoteBundle, or null if that symbol's fetch/parse
+// failed. A transport-level failure of the WHOLE batch (fetchAll itself
+// throwing) degrades to "every symbol in this batch failed", never a crash.
+function fetchQuoteBatch_(symbols, range, tz) {
+  if (symbols.length === 0) return [];
+  var requests = symbols.map(function (sym) {
+    return {
+      url: 'https://query1.finance.yahoo.com/v8/finance/chart/' + sym + '?range=' + range + '&interval=1d',
+      muteHttpExceptions: true,
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+    };
+  });
+  var responses;
+  try {
+    responses = UrlFetchApp.fetchAll(requests);
+  } catch (e) {
+    return symbols.map(function () { return null; });
+  }
+  return responses.map(function (response) {
+    try {
+      if (!response || response.getResponseCode() !== 200) return null;
+      return parseQuoteResponse_(JSON.parse(response.getContentText()), tz);
+    } catch (e) {
+      return null;
+    }
+  });
+}
+
+/**
+ * getQuotes_(tickerCodeMap[, range]) — design.md §D.1, Phase 3 audit A1/A2.
+ *
+ * Batches every ticker's `.TW` attempt into ONE `UrlFetchApp.fetchAll`, then
+ * a SECOND `fetchAll` for just the tickers that missed (those resolve on
+ * `.TWO`) — two parallel round trips instead of one sequential fetch per
+ * ticker. Every consumer (getPricesFromSheet, recordDailySnapshot,
+ * backfillDailySnapshots) calls this and derives current/prevClose/history
+ * from the same bundle, closing the gap described in §D.0.
+ *
+ * @param {Object<string,string>} tickerCodeMap ticker NAME -> 4-digit code.
+ * @param {string} [range] Yahoo `range` token; defaults to DEFAULT_QUOTE_RANGE
+ *   ('1mo' — enough for current/prevClose). backfillDailySnapshots passes a
+ *   wider one sized to its actual requested window (A2).
+ * @return {Object<string, QuoteBundle|{error:string}>} one entry per input
+ *   ticker. A ticker whose fetch failed gets `{error:'fetch_failed'}` —
+ *   NEVER a silently-zero price (§D hard constraint, T7).
+ */
+function getQuotes_(tickerCodeMap, range) {
+  range = range || DEFAULT_QUOTE_RANGE;
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var tz = ss.getSpreadsheetTimeZone() || Session.getScriptTimeZone() || 'Asia/Taipei';
+  var cache = CacheService.getScriptCache();
+  var now = new Date();
+  var out = {};
+
+  // Resolve codes + serve whatever's already cached; everything left over is
+  // one batch of work, not N.
+  var pending = [];   // { ticker, code, cacheKey }
+  for (var ticker in tickerCodeMap) {
+    if (!Object.prototype.hasOwnProperty.call(tickerCodeMap, ticker)) continue;
+    var code = normalizeQuoteCode_(tickerCodeMap[ticker]);
+    if (!code) { out[ticker] = { error: 'no_code' }; continue; }
+
+    var cacheKey = quoteCacheKey_(code, range);
+    var cached = cache ? cache.get(cacheKey) : null;
+    if (cached) {
+      try { out[ticker] = JSON.parse(cached); continue; } catch (e) { /* corrupt cache entry — refetch below */ }
+    }
+    pending.push({ ticker: ticker, code: code, cacheKey: cacheKey });
+  }
+  if (pending.length === 0) return out;
+
+  function cacheAndStore(p, bundle, symbol) {
+    bundle.code = p.code;
+    bundle.symbol = symbol;
+    out[p.ticker] = bundle;
+    if (cache) {
+      var ttl = bundle.isClosed ? secondsUntilNextTaipei8am_(now) : PRICE_CACHE_LIVE_TTL;
+      try { cache.put(p.cacheKey, JSON.stringify(bundle), ttl); } catch (e) { /* value too large / cache unavailable — non-fatal */ }
+    }
+  }
+
+  // Batch 1: every pending ticker's .TW symbol.
+  var twSymbols = pending.map(function (p) { return p.code + '.TW'; });
+  var twResults = fetchQuoteBatch_(twSymbols, range, tz);
+
+  var needTwo = [];
+  for (var i = 0; i < pending.length; i++) {
+    var bundle = twResults[i];
+    if (bundle) cacheAndStore(pending[i], bundle, pending[i].code + '.TW');
+    else needTwo.push(pending[i]);
+  }
+  if (needTwo.length === 0) return out;
+
+  // Batch 2: only the tickers .TW missed — this is the TPEx (.TWO) set.
+  var twoSymbols = needTwo.map(function (p) { return p.code + '.TWO'; });
+  var twoResults = fetchQuoteBatch_(twoSymbols, range, tz);
+
+  for (var j = 0; j < needTwo.length; j++) {
+    var bundle2 = twoResults[j];
+    if (bundle2) {
+      cacheAndStore(needTwo[j], bundle2, needTwo[j].code + '.TWO');
+    } else {
+      out[needTwo[j].ticker] = { error: 'fetch_failed' };
+      Logger.log('getQuotes_: fetch failed for ' + needTwo[j].ticker + ' (' + needTwo[j].code + ')');
+    }
+  }
+  return out;
 }
 
 /**
@@ -417,91 +700,75 @@ function getCurrentHoldings_(ss) {
 var HISTORY_WINDOW_DAYS = 365;
 
 /**
- * Returns the session the market data currently reflects, taken from the feed
- * itself rather than from the clock — GOOGLEFINANCE returns a bare number with
- * no indication of which session it belongs to, so the run date is NOT a safe
- * label (a run before the close stamps yesterday's close under today's date).
- *
- * @param {string} tz Timezone to format the date in (the sheet's).
- * @return {{date: string, isClosed: boolean}|null} null if the probe fails.
- */
-function getLastTradeSession_(tz) {
-  // 2330 台積電 — most liquid TWSE name, safest probe for the session date.
-  var url = "https://query1.finance.yahoo.com/v8/finance/chart/2330.TW";
-  try {
-    var response = UrlFetchApp.fetch(url, {
-      muteHttpExceptions: true,
-      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
-    });
-    if (response.getResponseCode() !== 200) return null;
-    var meta = JSON.parse(response.getContentText()).chart.result[0].meta;
-    if (!meta || !meta.regularMarketTime) return null;
-    var ts = new Date(meta.regularMarketTime * 1000);
-    // TWSE closes 13:30; at the close regularMarketTime reads ~13:30:0x. An
-    // earlier time-of-day therefore means the session is still in progress and
-    // this is an intraday quote, not a close. (Yahoo's chart endpoint does NOT
-    // return marketState — that field is on the quote endpoint — so the
-    // timestamp is the only signal available here.)
-    var hhmm = Utilities.formatDate(ts, 'Asia/Taipei', 'HHmm');
-    return {
-      date: Utilities.formatDate(ts, tz, 'yyyy-MM-dd'),
-      isClosed: Number(hhmm) >= 1330
-    };
-  } catch (e) {
-    return null;
-  }
-}
-
-/**
  * Calculates current portfolio value and appends it to the DailyHistory sheet.
  * Cleans up rows older than 365 days to maintain a rolling 1-year window.
+ *
+ * Rev 4.7 (design.md §D): reads getQuotes_ exclusively — it never calls
+ * getValues() on the Prices tab's 'price'/'closeyest' columns (§D.5), and the
+ * value written is `closes[sessionDate]` of the same bundle `?resource=prices`
+ * serves, gated on `isClosed` so a mid-session run can't stamp a half-formed
+ * value onto today's row (§D.2).
  */
 function recordDailySnapshot() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  
-  // 1. Get current portfolio value
+
+  // 1. Get current holdings + their codes (ticker/code columns only — never
+  //    the 'price'/'closeyest' cells, per §D.5).
   const holdings = getCurrentHoldings_(ss);
   if (!holdings) return;
-  
+
   const pricesSheet = ss.getSheetByName('Prices');
   if (!pricesSheet) return;
   const pricesData = pricesSheet.getDataRange().getValues();
   if (pricesData.length <= 1) return;
-  
-  const priceHeaders = pricesData[0];
-  const priceTickerCol = priceHeaders.indexOf('ticker');
-  const priceValCol = priceHeaders.indexOf('price');
-  
-  var totalValue = 0;
+
+  const tickerCodeMap = {};
   for (let i = 1; i < pricesData.length; i++) {
-    const row = pricesData[i];
-    const ticker = row[priceTickerCol] ? String(row[priceTickerCol]).trim() : '';
-    const price = Number(row[priceValCol]);
-    if (ticker && holdings[ticker] !== undefined && !isNaN(price)) {
-      totalValue += holdings[ticker] * price;
-    }
+    const name = pricesData[i][0] != null ? pricesData[i][0].toString().trim() : '';
+    const code = pricesData[i][1] != null ? pricesData[i][1].toString().trim() : '';
+    if (name && code && holdings[name] !== undefined) tickerCodeMap[name] = code;
   }
-  
+  if (Object.keys(tickerCodeMap).length === 0) return;
+
+  const quotes = getQuotes_(tickerCodeMap);
+
+  // Every TWSE/TPEx ticker shares one exchange session, so the first bundle
+  // that resolved is representative of session date/closed-ness for the whole
+  // snapshot (this replaces the old single-ticker 2330 probe).
+  let sessionDate = null, isClosed = false, gotBundle = false;
+  const fetchErrors = [];
+  var totalValue = 0;
+  for (const ticker in tickerCodeMap) {
+    const bundle = quotes[ticker];
+    if (!bundle || bundle.error) { fetchErrors.push(ticker); continue; }
+    if (!gotBundle) { sessionDate = bundle.sessionDate; isClosed = bundle.isClosed; gotBundle = true; }
+    const price = currentOf(bundle);
+    // Never silently valued at 0 — a failed/priceless ticker is just excluded
+    // from the sum, same as every other "no price" case in this codebase.
+    if (price != null) totalValue += holdings[ticker] * price;
+  }
+  if (fetchErrors.length > 0) {
+    Logger.log('recordDailySnapshot: quote fetch failed for: ' + fetchErrors.join(', '));
+  }
+  if (!gotBundle) return;   // every fetch failed — nothing trustworthy to record
+
+  if (!isClosed) {
+    // Mid-session: closes[sessionDate] is the live in-progress bar (§D.2,
+    // user's choice 2026-09-20 — live intraday). Writing it here would stamp
+    // an unsettled value onto today's row. Skip; the after-close run records
+    // it properly.
+    return;
+  }
+  const stampDate = sessionDate;
+
   // 2. Write to DailyHistory
   let historySheet = ss.getSheetByName('DailyHistory');
   if (!historySheet) {
     historySheet = ss.insertSheet('DailyHistory');
     historySheet.appendRow(['date', 'value']);
   }
-  
-  const tz = ss.getSpreadsheetTimeZone() || Session.getScriptTimeZone() || 'Asia/Taipei';
 
-  // Stamp the row with the session the PRICES belong to, not the run date.
-  const session = getLastTradeSession_(tz);
-  if (session && !session.isClosed) {
-    // Mid-session: the price column is an intraday quote, not a close. Writing
-    // it would put a half-formed value on today's row. Skip; the after-close
-    // run records it properly.
-    return;
-  }
-  const stampDate = (session && session.date)
-    ? session.date
-    : Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');  // probe failed — fall back to run date
+  const tz = ss.getSpreadsheetTimeZone() || Session.getScriptTimeZone() || 'Asia/Taipei';
 
   const historyData = historySheet.getDataRange().getValues();
   let foundRow = -1;
@@ -540,14 +807,23 @@ function recordDailySnapshot() {
  * Reconstructs daily snapshots and writes them to the DailyHistory sheet.
  *
  * Default start is a trailing HISTORY_WINDOW_DAYS (365) — the same window the
- * prune maintains, so one run fills the chart exactly. Prices are fetched as
- * one date-range request per ticker, so a longer window costs no extra Yahoo
- * calls than a short one.
+ * prune maintains, so one run fills the chart exactly.
+ *
+ * Phase 3 audit finding A2: the Yahoo `range` requested from getQuotes_ is now
+ * sized to the ACTUAL start..now span (yahooRangeForDays_), not a hardcoded
+ * default meant for a same-day current/prevClose lookup — a 365-day window
+ * asks for `range=1y`, not the `1mo` every other caller needs. If Yahoo still
+ * doesn't cover everything asked for (e.g. a very old start date, or a
+ * recently-listed ticker), that shortfall is logged with an exact count
+ * instead of silently writing fewer rows than requested (§D — the whole
+ * point of this revision is no more silent shortfalls).
  *
  * @param {number|string} [start] Omit for the trailing 365-day window; a number
  *        = that many months back (legacy); a 'YYYY-MM-DD' string = explicit
  *        start (note: anything older than the window is trimmed by the next
  *        recordDailySnapshot run unless HISTORY_WINDOW_DAYS is raised too).
+ * @return {{newRows:number, existingUntouched:number, unpriceable:number}}
+ *   Summary for tests / manual runs; GAS triggers ignore the return value.
  */
 function backfillDailySnapshots(start) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -568,9 +844,15 @@ function backfillDailySnapshots(start) {
     startDate = new Date(now.getTime());
     startDate.setDate(startDate.getDate() - (HISTORY_WINDOW_DAYS - 1));
   }
+  // A2: request exactly as much Yahoo history as this window needs — the
+  // default 1mo every other caller uses would silently starve anything wider.
+  const spanDays = Math.max(1, Math.ceil((now.getTime() - startDate.getTime()) / 86400000));
+  const quoteRange = yahooRangeForDays_(spanDays);
+
   Logger.log('Backfilling from ' + Utilities.formatDate(startDate, tz, 'yyyy-MM-dd')
-             + ' to ' + Utilities.formatDate(now, tz, 'yyyy-MM-dd'));
-  
+             + ' to ' + Utilities.formatDate(now, tz, 'yyyy-MM-dd')
+             + ' (' + spanDays + ' day(s), requesting Yahoo range=' + quoteRange + ')');
+
   const dates = [];
   let curr = new Date(startDate);
   while (curr <= now) {
@@ -603,91 +885,53 @@ function backfillDailySnapshots(start) {
     });
   }
   
-  // 3. Load all tickers and fetch their historical close prices
-  const tickers = [];
+  // 3. Load ticker->code map (trimmed both sides — §D fix: the old version
+  //    keyed priceMap by the RAW Prices!A cell but the reconstruction below
+  //    looks it up with a trimmed ticker, so any name with a stray space
+  //    (e.g. '台積電 ') was silently valued at 0 on every day) and fetch each
+  //    one's quote bundle via getQuotes_ (§D.1) — one Yahoo request per
+  //    ticker, same as every other consumer, instead of this function's own
+  //    bespoke period1/period2 fetch loop.
   const pricesSheet = ss.getSheetByName('Prices');
   if (!pricesSheet) return;
   const pricesData = pricesSheet.getDataRange().getValues();
+  const tickerCodeMap = {};
   for (let i = 1; i < pricesData.length; i++) {
-    const code = pricesData[i][1];
-    if (code) tickers.push(pricesData[i][0]);
+    const name = pricesData[i][0] != null ? pricesData[i][0].toString().trim() : '';
+    const code = pricesData[i][1] != null ? pricesData[i][1].toString().trim() : '';
+    if (name && code) tickerCodeMap[name] = code;
   }
-  
-  const period1 = Math.floor(startDate.getTime() / 1000);
-  const period2 = Math.floor(now.getTime() / 1000);
-  
-  const priceMap = {};
-  const nameToCode = {};
-  for (let i = 1; i < pricesData.length; i++) {
-    const name = pricesData[i][0];
-    const code = pricesData[i][1];
-    if (name && code) nameToCode[name] = code;
+  if (Object.keys(tickerCodeMap).length === 0) return;
+
+  const quotes = getQuotes_(tickerCodeMap, quoteRange);
+  const priceMap = {};       // ticker -> closes (from each ticker's own bundle)
+  const fetchErrors = [];
+  for (const name in tickerCodeMap) {
+    const bundle = quotes[name];
+    if (!bundle || bundle.error) { fetchErrors.push(name); continue; }  // never a silent 0 (T7)
+    priceMap[name] = bundle.closes;
   }
-  
-  for (const name of tickers) {
-    let code = nameToCode[name];
-    if (!code) continue;
-    
-    // Normalize code exactly like GET_TAIWAN_STOCK_PRICE does
-    if (typeof code === 'number') {
-      code = code.toFixed(0);
-    }
-    code = String(code).trim();
-    if (code.length === 2) code = "00" + code;
-    if (code.length === 3) code = "0" + code;
-    
-    priceMap[name] = {};
-    const symbols = [code + ".TW", code + ".TWO"];
-    let success = false;
-    
-    Utilities.sleep(200); // Sleep 200ms to avoid Yahoo Finance rate-limiting
-    
-    for (const symbol of symbols) {
-      const url = "https://query1.finance.yahoo.com/v8/finance/chart/" + symbol + "?period1=" + period1 + "&period2=" + period2 + "&interval=1d";
-      try {
-        const response = UrlFetchApp.fetch(url, {
-          muteHttpExceptions: true,
-          headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
-        });
-        
-        if (response.getResponseCode() === 200) {
-          const json = JSON.parse(response.getContentText());
-          const result = json.chart && json.chart.result && json.chart.result[0];
-          if (result && result.timestamp) {
-            const timestamps = result.timestamp;
-            const closePrices = result.indicators && result.indicators.quote && result.indicators.quote[0] && result.indicators.quote[0].close;
-            if (closePrices) {
-              for (let j = 0; j < timestamps.length; j++) {
-                const dateStr = Utilities.formatDate(new Date(timestamps[j] * 1000), tz, 'yyyy-MM-dd');
-                const price = closePrices[j];
-                if (price != null) priceMap[name][dateStr] = price;
-              }
-              success = true;
-            }
-          }
-        }
-      } catch (e) {
-        // Ignore
-      }
-      if (success) break;
-    }
-    
-    if (!success) {
-      Logger.log("Failed to fetch historical prices for ticker: " + name + " (code: " + code + ")");
-    }
+  if (fetchErrors.length > 0) {
+    Logger.log('backfillDailySnapshots: quote fetch failed for: ' + fetchErrors.join(', '));
   }
-  
-  // 4. Reconstruct holdings & calculate value for each date
+
+  // 4. Reconstruct holdings & calculate value for each date that has NO
+  //    existing DailyHistory row. Rev 4.7 (§D.7): the destructive clear() is
+  //    gone — this can never again overwrite a value recordDailySnapshot (or
+  //    a prior backfill) already committed; existing rows are fix-forward.
   let historySheet = ss.getSheetByName('DailyHistory');
   if (!historySheet) {
     historySheet = ss.insertSheet('DailyHistory');
     historySheet.appendRow(['date', 'value']);
-  } else {
-    historySheet.clear();
-    historySheet.appendRow(['date', 'value']);
   }
-  
-  const dailyValues = [];
+
+  const existingRows = historySheet.getDataRange().getValues();
+  const existingDates = new Set();
+  for (let i = 1; i < existingRows.length; i++) {
+    let d = existingRows[i][0];
+    if (d && typeof d.getTime === 'function') d = Utilities.formatDate(d, tz, 'yyyy-MM-dd');
+    if (d) existingDates.add(String(d));
+  }
 
   // Positions are derived by walking BACKWARDS from today's known holdings,
   // undoing each trade as we step past its date — not forwards from zero.
@@ -705,9 +949,12 @@ function backfillDailySnapshots(start) {
   for (const k in anchor) holdings[k] = anchor[k];
 
   let ti = 0;                       // index into `desc`, advances monotonically
-  const rowsDesc = [];
+  const newRows = [];               // collected newest -> oldest, reversed before writing
+  const unpriceableDates = [];      // A2: dates this run was asked to fill but couldn't price at all
   for (let i = dates.length - 1; i >= 0; i--) {
     const date = dates[i];
+    if (existingDates.has(date)) continue;   // §D.7: never touch a date that already has a row
+
     // undo everything traded strictly after this date
     while (ti < desc.length && desc[ti].date > date) {
       const tr = desc[ti];
@@ -715,41 +962,55 @@ function backfillDailySnapshots(start) {
       holdings[tk] = (holdings[tk] || 0) - (tr.type === 'buy' ? tr.shares : -tr.shares);
       ti++;
     }
-    
+
     let totalValue = 0;
     let hasPricedStock = false;
-    
+
     for (const [ticker, shares] of Object.entries(holdings)) {
       if (shares <= 0) continue;
-      
-      let price = null;
-      let checkDate = new Date(date);
-      for (let lookback = 0; lookback < 10; lookback++) {
-        const dStr = Utilities.formatDate(checkDate, tz, 'yyyy-MM-dd');
-        if (priceMap[ticker] && priceMap[ticker][dStr] !== undefined) {
-          price = priceMap[ticker][dStr];
-          break;
-        }
-        checkDate.setDate(checkDate.getDate() - 1);
-      }
-      
-      if (price !== null) {
+      const price = closeAsOf_(priceMap[ticker], date, 10);
+      if (price != null) {
         totalValue += shares * price;
         hasPricedStock = true;
       }
     }
-    
+
     if (hasPricedStock) {
-      rowsDesc.push([date, Math.round(totalValue)]);
+      newRows.push([date, Math.round(totalValue)]);
+    } else {
+      // A2: no held ticker had a close within lookback of this date — most
+      // likely it falls outside what `quoteRange` actually returned. Loud,
+      // not a quietly-shorter chart.
+      unpriceableDates.push(date);
     }
   }
-  for (let i = rowsDesc.length - 1; i >= 0; i--) dailyValues.push(rowsDesc[i]);
-  
-  if (dailyValues.length > 0) {
-    historySheet.getRange(2, 1, dailyValues.length, 2).setValues(dailyValues);
+  newRows.reverse();   // oldest -> newest
+
+  if (newRows.length > 0) {
+    historySheet.getRange(historySheet.getLastRow() + 1, 1, newRows.length, 2).setValues(newRows);
+    // Keep the sheet sorted by date so the chart and the rolling-window prune
+    // (recordDailySnapshot) still see it in order after these appends.
+    const lastRow = historySheet.getLastRow();
+    if (lastRow > 2) {
+      historySheet.getRange(2, 1, lastRow - 1, historySheet.getLastColumn()).sort({ column: 1, ascending: true });
+    }
   }
-  
-  Logger.log("Backfilled " + dailyValues.length + " daily snapshots!");
+
+  if (unpriceableDates.length > 0) {
+    // A2: loud, not silent — exactly which requested dates this run could not
+    // price, so a start date wider than `quoteRange` actually covers is
+    // visible in the log instead of just producing a shorter chart.
+    Logger.log('backfillDailySnapshots: ' + unpriceableDates.length + ' requested date(s) could NOT be '
+               + 'priced (no held ticker had a close within 10 days, i.e. outside range=' + quoteRange
+               + "'s coverage or before market data existed): "
+               + unpriceableDates.slice(0, 10).join(', ')
+               + (unpriceableDates.length > 10 ? ', ...' : ''));
+  }
+  Logger.log('Backfilled ' + newRows.length + ' new daily snapshot(s); '
+             + existingDates.size + ' existing row(s) left untouched; '
+             + unpriceableDates.length + ' requested date(s) could not be priced.');
+
+  return { newRows: newRows.length, existingUntouched: existingDates.size, unpriceable: unpriceableDates.length };
 }
 
 /**

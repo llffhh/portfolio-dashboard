@@ -1,5 +1,54 @@
 # Changelog
 
+## [Rev 4.7] - Unified price service (2026-09-20)
+
+See design.md Section D. Current Value, Yesterday Value and DailyHistory now derive
+from one Yahoo response per ticker, so they can no longer disagree.
+
+### Fixed
+- **The three figures could not be reconciled.** `GET_TAIWAN_STOCK_PRICE` is a Sheets
+  *custom function*: its result is cached with no timer refresh and it never executes
+  in a trigger context. `recordDailySnapshot` read that cell, so it recorded a value of
+  unbounded, invisible age - moving the trigger later could not help, because the
+  trigger reads a cell rather than fetching. All three consumers now call `getQuotes_`.
+- **Yesterday Value was one bad refactor from breaking.** `meta.chartPreviousClose` is
+  range-dependent (2303.TW returned 147.5 / 143 / 142.5 for no-params / `range=10d` /
+  `range=5d`) and `meta.previousClose` is absent whenever range params are passed. All
+  figures now come from the `closes` array; no `meta` price field is read anywhere.
+- **A bare Yahoo chart request returns 1-minute bars for a single day**
+  (`dataGranularity=1m`, 270 bars, 1 distinct date), which would have made `prevCloseOf`
+  return null on every live call with a fully green test suite. Requests are now explicit
+  about `range` and `interval`.
+- **Stray-whitespace ticker keys.** The backfill keyed its price map by the raw `Prices!A`
+  cell but looked it up with a trimmed name, silently valuing any affected holding at 0 on
+  every day. Trimmed on both sides in all three rewritten functions.
+- **`backfillDailySnapshots` no longer calls `historySheet.clear()`** - it upserts only
+  dates with no row, so it can never again overwrite a value the trigger recorded.
+
+### Changed
+- `Prices` tab is now the ticker->code map plus the year-end close columns. The
+  `price`/`closeyest` formula columns are no longer read by anything.
+- Quotes are fetched in **two parallel `UrlFetchApp.fetchAll` batches** (a `.TW` pass, then
+  a `.TWO` retry pass) rather than one sequential fetch per ticker, and `getPricesFromSheet`
+  scopes live quotes to currently-held tickers. Cold-cache cost went from 45 sequential
+  round trips to 2 parallel ones. `backfillDailySnapshots` still quotes every coded ticker -
+  it reconstructs past positions, which legitimately include since-sold holdings.
+- Quote cache (`CacheService`) is keyed `q_<code>_<range>`, so a narrow cached entry cannot
+  satisfy a wider request.
+- `backfillDailySnapshots` sizes its Yahoo range to its actual requested span and now
+  reports dates it could not price instead of quietly writing fewer rows.
+- Current Value carries an "intraday - today's close not yet settled" note while the served
+  session is still open.
+
+### Notes
+- Existing DailyHistory rows are untouched (fix-forward, by decision).
+- Yahoo coverage was tested across the whole Prices tab: 39/39 coded tickers resolved,
+  including TPEx names via `.TWO` that `GOOGLEFINANCE("TPE:"&code)` cannot reach. Every
+  failure was a missing code in the sheet, not a Yahoo gap.
+- `design.md` A.5 previously described the price columns as `GOOGLEFINANCE`; they were
+  `GET_TAIWAN_STOCK_PRICE`, which is why they were opaquely cached. Corrected.
+- Tests: 129 green (94 pre-existing + 35 new).
+
 ## [Rev 4.6] — Saved plans valued at their save-day snapshot (2026-09-16)
 
 See design.md §C.14. Replaces Rev 4.5's ledger matching, which zeroed out plans recorded after their sales.

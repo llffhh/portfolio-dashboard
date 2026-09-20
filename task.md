@@ -423,3 +423,373 @@ primary revenue), and tier-neutral in any case.
    engine untouched; 50/50 tests still green. This should have been caught in the round-2 audit.
 
 **Not committed.** Phase 4 (Publisher) is a separate gate awaiting the owner's approval.
+
+---
+
+# Rev 4.7 — Unified price service (Phase 2 assignment, opened 2026-09-20)
+
+**Read `design.md` §D.** Everything below implements it. Do not touch §A/§B/§C behaviour.
+
+**Goal:** Current Value, Yesterday Value and DailyHistory must all read the same
+stock value, so that after the close Current Value === today's DailyHistory row.
+
+Nearly all the work is in `gas/Code.js`. The PriceMap wire contract is unchanged,
+so `src/` needs only the D.2 intraday note.
+
+## Acceptance tests (write first — MUST be RED before implementation)
+
+Pure helpers only; `test/gas.*.test.js` already shows how to exercise GAS
+functions in a Node sandbox (see the `validateScenario_` tests).
+
+- [x] T1 `parseQuoteResponse_(json, tz)` builds `{sessionDate, isClosed, closes}`
+      from a captured Yahoo payload; null closes are dropped.
+- [x] T2 `isClosed` is true iff the `regularMarketTime` Taipei time-of-day >= 13:30.
+- [x] T3 `currentOf(bundle) === bundle.closes[bundle.sessionDate]`.
+- [x] T4 `prevCloseOf(bundle)` = close of the latest date **strictly before**
+      `sessionDate`. **Must not read `meta.chartPreviousClose`** — §D.1 records it
+      returning 147.5/143/142.5 for the same stock at different ranges.
+- [x] T5 **The invariant.** Given a settled bundle, the value `recordDailySnapshot`
+      would write equals the value `?resource=prices` serves for `sessionDate`.
+- [x] T6 Upsert: backfilling a date that already has a row leaves it unchanged.
+- [x] T7 A ticker whose fetch fails is reported, never silently valued at 0.
+- [x] All new acceptance tests confirmed FAILING before implementation began
+      (verified by `git stash`-ing `gas/Code.js` back to its pre-Rev-4.7 committed
+      state and re-running `test/gas.priceservice.test.js`: 21 failed / 3 passed,
+      then restored — see Gemini Notes below).
+
+## Implementation
+
+- [x] `getQuotes_(codes)` per §D.1 — one `chart` request per ticker, `.TW` then
+      `.TWO`. Return the §D.1 QuoteBundle shape.
+- [x] `CacheService` per §D.3: one entry per ticker, 300 s live / to 08:00 settled.
+- [x] Rewrite `getPricesFromSheet` to serve from `getQuotes_`: `current` under
+      `sessionDate`, `prevClose` under `closeyest`. **Read the ticker→code map from
+      the Prices tab; never read the `price`/`closeyest` cells again** (§D.5).
+- [x] `recordDailySnapshot` → `closes[sessionDate]`, gated on `isClosed`. It must
+      not call `getValues()` on the price columns.
+- [x] `backfillDailySnapshots` → `getQuotes_`; **delete the `historySheet.clear()`**
+      and upsert only dates with no row (§D.7).
+- [x] **Trim on both sides of every ticker lookup.** The present backfill keys its
+      price map by the raw `Prices!A` cell but looks it up with a trimmed name, so
+      any ticker with a stray space is valued 0 on every day (CHANGELOG Rev 4.6
+      records `'台積電 '`). Reuse `getCurrentHoldings_`'s trimming. Applied in all
+      three rewritten functions, not just the backfill (see Gemini Notes).
+- [x] Per-ticker fetch failure must surface in the response, not just `Logger.log`.
+      Interpreted as `getQuotes_`'s own return value carrying `{error:...}` per
+      ticker (see Gemini Notes — flagged as an interpretation, not a literal spec
+      quote).
+- [x] `src/app.js`: while `isClosed` is false, label the Current Value card
+      "intraday — today's close not yet settled" (§D.2). Bump the `?v=` tag on any
+      changed internal import (Rev 3.2 gotcha) — `index.html`'s `src/app.js?v=13`
+      → `?v=14` (app.js gained no new imports, so no internal import tag changed).
+
+## Definition of Done (Phase 2)
+
+- [x] T1–T7 green; existing suite still green (118/118: 94 pre-existing + 24 new).
+- [x] `design.md` §D.5 reflected: nothing in the pipeline reads `price`/`closeyest`
+      (verified by grep — see Gemini Notes).
+- [x] No behaviour change to the Yearly chart or year-end history.
+- [x] Hand to Phase 3 (Auditor) — **do not deploy.** Deploy is Phase 4 and needs
+      `node gas/deploy.mjs` plus the user's explicit approval. **Not deployed, not
+      committed, not pushed** by this Phase 2 pass.
+
+## Gemini Notes — Rev 4.7
+
+### Iteration 1 — 2026-09-20 (Rev 4.7 Unified price service)
+**Triggered by:** Phase 2 assignment opened 2026-09-20, `design.md` §D.
+
+**Actions taken:**
+- Wrote `test/gas.priceservice.test.js` (24 tests: T1–T7 plus extra unit coverage
+  for `closeAsOf_`/`secondsUntilNextTaipei8am_`/caching/trim behaviour), following
+  `test/gas.sellplans.test.js`'s `vm.createContext` pattern. Confirmed RED by
+  `git stash`-ing `gas/Code.js` back to the pre-Rev-4.7 committed version and
+  re-running the suite (21 failed / 3 passed — the 3 passes were generic helper
+  assertions unrelated to this feature), then `git stash pop` to restore.
+- Implemented `parseQuoteResponse_`, `currentOf`, `prevCloseOf`, `closeAsOf_`,
+  `normalizeQuoteCode_`, `secondsUntilNextTaipei8am_`, `fetchYahooChartJson_`,
+  `fetchQuoteForCode_`, `getQuotes_` in `gas/Code.js` per §D.1/§D.3.
+- Rewrote `getPricesFromSheet`, `recordDailySnapshot`, `backfillDailySnapshots` to
+  read exclusively from `getQuotes_`; removed the now-superseded
+  `getLastTradeSession_` (confirmed via grep it had no other callers).
+- Added the D.2 intraday note to `src/app.js` (`isLikelyIntraday`/
+  `taipeiClockParts`) and a `#val-current-note` element in `index.html`.
+
+**Deviations / interpretations (flagged for Auditor):**
+1. **Yahoo request params.** §D.1 says "one chart request per ticker" without
+   specifying query params. I initially implemented a bare, param-less request
+   (matching the literal reading) and it passed all 24 tests against synthetic
+   fixtures — but a live `curl` against Yahoo during this session showed a
+   **completely bare request returns 1-minute intraday bars for a single
+   calendar day**, so every timestamp collapses onto today's date and
+   `prevCloseOf` would always return `null` in production (Yesterday Value would
+   silently break on the very first live call, despite all tests passing).
+   Fixed by adding `?range=1mo&interval=1d` to the fetch — empirically verified
+   this returns ~21-25 real trading days of one-bar-per-day closes plus a valid
+   `meta.regularMarketTime`, for both a `.TW` (2330) and a `.TWO` (8299) symbol.
+   This does **not** reintroduce the "range-dependent" hazard §D.1 warns about,
+   because nothing in this file reads `meta.chartPreviousClose` /
+   `meta.previousClose` / `meta.regularMarketPrice` — only `closes`, exclusively,
+   everywhere. **Recommend the Auditor re-verify this against live Yahoo data**,
+   since I could not run the actual `gas/Code.js` inside real Apps Script this
+   session (only a Node `vm` sandbox with fakes) and Yahoo's undocumented
+   behaviour could change.
+2. **Historical depth for `backfillDailySnapshots` is reduced.** The pre-4.7
+   version fetched an explicit `period1`/`period2` window sized to the caller's
+   requested range (up to the full 365-day `HISTORY_WINDOW_DAYS`) — one ranged
+   request per ticker, covering the whole window in one call. `getQuotes_`'s
+   §D.1 signature (`getQuotes_(codes)`, no range parameter) doesn't allow that;
+   with the `range=1mo` fetch above, `backfillDailySnapshots` can now only
+   gap-fill dates within roughly the trailing month, not reconstruct a full
+   365-day window from scratch on an empty `DailyHistory` sheet. Given D.7's
+   "fix forward, existing rows untouched" framing, this reads as an accepted
+   trade-off (the function's job going forward is mostly filling small recent
+   gaps, e.g. a day the trigger failed), not a full historical rebuilder — but
+   it IS a real capability loss versus the pre-4.7 code, worth the user/Auditor
+   knowing about explicitly rather than discovering silently.
+3. **"Per-ticker fetch failure must surface in the response"** (task.md
+   implementation bullet) — implemented as `getQuotes_`'s own return value
+   carrying `{error:'fetch_failed'}` / `{error:'no_code'}` per ticker (consumed
+   internally by all three callers, which exclude that ticker and `Logger.log`
+   it), **not** as a new field added to the public `?resource=prices` JSON
+   response. I read "the response" as referring to `getQuotes_`, the function
+   named in the very next bullet, and chose this because the **hard constraint**
+   "the PriceMap wire contract (§A.5) is unchanged" explicitly forbids adding
+   any new top-level/sibling key to that JSON. If the Auditor intended "the
+   response" to mean the public HTTP response instead, that would need a wire
+   change and should come back as a design amendment, not something I should
+   have silently decided either way.
+4. **D.2 intraday note (`src/app.js`) uses a client-clock proxy, not a server
+   field.** §D.4's consumer table lists no `isClosed` key for `?resource=prices`,
+   and the hard constraint says the wire contract is unchanged — so there is no
+   channel for the server's real `isClosed` to reach the browser. I derived it
+   client-side instead: `priceToday` (the served `sessionDate`) equal to today's
+   Taipei calendar date AND the Taipei wall-clock time-of-day still before
+   13:30 ⇒ "intraday"; anything else (including `priceToday` being an earlier
+   date, i.e. a weekend/holiday carry-forward) ⇒ settled. This mirrors the
+   server's own >=13:30 rule but trusts the *browser's* clock, not the Yahoo
+   feed's timestamp — they will disagree only within seconds of the boundary
+   or if the viewer's clock is wrong. Flagging as an interpretation since §D.2
+   doesn't specify a transport for this at all.
+5. **Removed `getLastTradeSession_`** (the old single-ticker 2330 probe used by
+   `recordDailySnapshot` to find session date/closed-ness) since it is fully
+   superseded by `getQuotes_` and had no other callers (checked via grep across
+   the repo, including `deploy.mjs`/tests). `recordDailySnapshot` now derives
+   session date/closed-ness from the first successfully-resolved bundle among
+   the tickers it's already fetching for valuation — no extra network call.
+6. **Performance/quota risk, not a deviation but worth flagging directly:** the
+   old `getPricesFromSheet` read pre-computed `GOOGLEFINANCE`/formula cells —
+   essentially free. The new one calls `getQuotes_` for **every** row in the
+   `Prices` tab on every `?resource=prices` request when the caller passes an
+   empty ticker filter (which `src/app.js` always does, to price historically-
+   sold tickers too) — up to ~50 live Yahoo fetches per web app call, mitigated
+   only by the §D.3 cache. A cold cache (e.g. right after the 08:00 Taipei
+   expiry, or the first request after a code change) could be noticeably slower
+   than before, and in the worst case risks Apps Script's execution time limit
+   if Yahoo is slow to respond. This is inherent to §D.1's "one Yahoo chart
+   request per ticker" mandate, not something I introduced by choice — but the
+   Auditor/user should know page-load latency can now vary with Yahoo's
+   responsiveness in a way it never did before.
+7. **No test exercises the real Apps Script/Sheets/Yahoo integration end-to-end**
+   — only a Node `vm` sandbox with fakes (`test/gas.priceservice.test.js`,
+   following the established `gas.sellplans.test.js` pattern) plus a few one-off
+   `curl` calls against the real Yahoo endpoint (used only to derive item 1
+   above, not run through `gas/Code.js` itself). Per the hard constraint, no
+   deploy was performed. **Recommend the Auditor (or the user, post-deploy)
+   confirm the live invariant** — Current Value === today's DailyHistory row
+   after the close — against the real Sheet once this ships.
+8. **`design.md` §D.6's blocking data-gap item** (pasting 友達/欣興/新增code rows
+   into the live `Prices` tab) is a spreadsheet edit by the user, out of scope
+   for this code-only pass — left untouched, as instructed.
+
+**Files changed:** `gas/Code.js`, `src/app.js`, `index.html`,
+`test/gas.priceservice.test.js` (new). `task.md` (this section) and no other file.
+
+**Not committed, not pushed, not deployed.**
+
+### Iteration 2 — 2026-09-20 (Phase 3 audit fixes A1/A2)
+**Triggered by:** Phase 3 audit findings A1 (cold-cache latency) and A2
+(backfill range silently reduced), user approved the fix iteration. A3
+(intraday label) and A4 (per-ticker failure surfacing) were accepted as built
+— not touched this round.
+
+**A1 — cold-cache latency:**
+- Replaced `getQuotes_`'s per-ticker sequential `UrlFetchApp.fetch` (via the
+  now-deleted `fetchYahooChartJson_`/`fetchQuoteForCode_`) with
+  `fetchQuoteBatch_`, which wraps `UrlFetchApp.fetchAll`. `getQuotes_` now
+  does at most 2 batches total for any number of tickers: one `fetchAll` of
+  every pending ticker's `.TW` symbol, then a second `fetchAll` of only the
+  symbols that missed (the `.TWO` set) — 45 sequential round trips collapse to
+  2 parallel ones on the current Prices tab. A whole-batch transport failure
+  (`fetchAll` itself throwing) degrades to "every ticker in that batch reports
+  `fetch_failed`", never a crash.
+- `getPricesFromSheet` now builds its `tickerCodeMap` (the set fed to
+  `getQuotes_`) from `getCurrentHoldings_(ss) ∩ coded Prices rows` instead of
+  every coded row — a ticker that's been sold out of the ledger no longer
+  costs a live Yahoo fetch it can't use. Year-end date columns are still
+  served for every row from the sheet, untouched, regardless of held status
+  (verified by a new test with one held + one non-held ticker sharing a
+  year-end column). `recordDailySnapshot` was already held-only (unchanged).
+  `backfillDailySnapshots` was deliberately left fetching ALL coded tickers,
+  not just held ones — it reconstructs historical positions for tickers that
+  have since been sold, which genuinely need a price too; narrowing it to
+  held-only would silently blank out sold positions' history.
+- Added 8 new tests under `describe('A1 — UrlFetchApp.fetchAll batching')` /
+  the new held-ticker guard test in the `getPricesFromSheet` block: exact
+  batch count/contents for a mixed `.TW`/`.TWO` set, zero batches on a fully
+  warm cache, whole-batch-throws degrading to per-ticker errors, a non-held
+  ticker never being fetched at all (0 URL calls, not just an excluded
+  result), and the auditor's explicitly-requested guard — a non-held ticker's
+  year-end column is byte-identical to before while a held ticker's
+  `sessionDate` key (what `src/app.js`'s `priceToday` resolves from) is still
+  present and correct.
+
+**A2 — backfill range silently reduced:**
+- Threaded `range` through `getQuotes_(tickerCodeMap, range)` →
+  `fetchQuoteBatch_(symbols, range, tz)`, defaulting to the module constant
+  `DEFAULT_QUOTE_RANGE = '1mo'` (unchanged behaviour for `getPricesFromSheet`/
+  `recordDailySnapshot`, which never pass a range explicitly).
+- Added `yahooRangeForDays_(days)`, a pure lookup table (`5d`/`1mo`/`3mo`/
+  `6mo`/`1y`/`2y`/`5y`/`10y`) mapping a calendar-day span to the smallest
+  Yahoo range token that should cover it. `backfillDailySnapshots` computes
+  `spanDays` from its actual `startDate..now` window and passes
+  `yahooRangeForDays_(spanDays)` — the default trailing-365-day window now
+  requests `range=1y`, not `1mo`.
+- **Cache key now includes `range`** (`quoteCacheKey_(code, range)` →
+  `'q_' + code + '_' + range'`), exactly the trap named in the audit: a
+  `q_2330_1mo` entry is a cache MISS for a `range='1y'` request and vice
+  versa. Covered by a dedicated test that seeds a `1mo` entry, requests `1y`
+  for the same code (asserts a fresh `fetchAll`, not a stale short-range
+  value), then requests `1mo` again (asserts THAT is still served from cache,
+  proving the two don't cross-contaminate in either direction).
+- **Loud shortfall reporting:** the per-date reconstruction loop now counts
+  `unpriceableDates` — a requested date (not already an existing row) where no
+  held ticker had a close within the existing 10-day lookback. When non-zero,
+  `Logger.log`s the exact count plus up to 10 sample dates, and the final
+  summary log line always states the unpriceable count (0 when everything was
+  covered). `backfillDailySnapshots` now also **returns**
+  `{newRows, existingUntouched, unpriceable}` (GAS ignores return values from
+  trigger-invoked functions, so this is purely additive — nothing depended on
+  the previous `undefined` return) so both a human reading the execution log
+  and a test/future caller can see the shortfall without parsing log text.
+- Added 4 new tests under `describe('A2 — range threading + loud shortfall')`:
+  a wide (300-day) window caches under `q_2330_1y` not `q_2330_1mo` and logs
+  `range=1y`; a narrow (3-day) window caches under `q_2330_5d`; a window wider
+  than the fixture's actual close coverage reports `unpriceable > 0`, logs a
+  count-bearing message, and still writes the rows it COULD price (not
+  all-or-nothing); a fully-covered window reports `unpriceable: 0`.
+
+**Verification:**
+- Confirmed the fix, not just written: `grep -n "fetchYahooChartJson_\|fetchQuoteForCode_" gas/Code.js`
+  returns nothing (fully replaced, no dangling references) and `node --check
+  gas/Code.js` / `node --check src/app.js` both pass.
+- `npx vitest run test/gas.priceservice.test.js`: **35/35 green** (24 T1–T7 +
+  original extras, minus the 4 tests that needed a `HeldLots` fixture added
+  after the A1 held-only filter landed — same assertions, now genuinely
+  exercising what they claim to — plus 11 new: 3 A1 batching, 1 A1
+  non-held-ticker guard, 4 A2 range/cache-key/shortfall, and the auditor's
+  named A1 year-end + priceToday guard).
+- Full suite: **129/129 green** (94 pre-existing + 35 in this file).
+- No `getLastTradeSession_`/`fetchYahooChartJson_`/`fetchQuoteForCode_`
+  remnants; §D.2 invariant intact — `currentOf`/`prevCloseOf` are untouched,
+  still read exclusively from `bundle.closes`, never a `meta` field.
+
+**What I could not fully verify:** same caveat as Iteration 1 — no live Apps
+Script/Yahoo run was performed (constraint: do not deploy). The `fetchAll`
+request/response shape used here (an array of `{url, muteHttpExceptions,
+headers}` objects, responses returned in the same order) matches Google's
+documented `UrlFetchApp.fetchAll` contract, but I could not execute it against
+the real Yahoo endpoint or real Apps Script this session — only against the
+Node `vm` fake, which trusts that contract rather than proving it live.
+**Recommend confirming this specific call against live Apps Script before/at
+deploy**, since `fetchAll`'s exact error behavior (e.g. what a single bad URL
+in a batch does to the others) is the one part of this fix that a sandbox
+fake can only approximate, not verify.
+
+**Not committed, not pushed, not deployed.**
+
+## Phase 3 — Auditor notes (Claude), Rev 4.7, 2026-09-20
+
+Verified independently, not taken from the coder's report: suite 118/118 green;
+`historySheet.clear()` gone; no `meta` price field read anywhere outside the
+legacy `GET_TAIWAN_STOCK_PRICE` custom function (§D.5 permits it there);
+year-end date columns still served off the sheet, so the Yearly chart is
+untouched; the bare-request finding reproduced exactly — `2330.TW` with no
+params returns `dataGranularity=1m`, 270 bars, **1 distinct day**, so
+`prevCloseOf` would have returned null on every live call. That was a gap in
+§D.1, which never specified range params. Architect's miss, caught by the coder.
+
+### A1 — Cold-cache latency (significant, fix before Phase 4)
+
+`getQuotes_` fetches **sequentially** (`gas/Code.js:503`); no `UrlFetchApp.fetchAll`.
+The frontend calls `getPrices([])`, so a cold cache costs, against the current
+Prices tab: 39 coded tickers, 33 resolving on `.TW` (1 fetch) and 6 on `.TWO`
+(2 fetches, `.TW` tried first) = **45 sequential round trips**. Estimated 9–18 s
+of added page-load latency where the old path read cells. Not measured live —
+the count is exact, the per-fetch time is an estimate.
+
+Fix: `UrlFetchApp.fetchAll()` for the `.TW` pass, then a second `fetchAll` for
+the codes that missed. Optionally narrow the live-quote set to held tickers —
+the history chart's year-end prices come off the sheet, not from `getQuotes_`.
+
+### A2 — Backfill range silently reduced (moderate)
+
+`fetchYahooChartJson_` hardcodes `range=1mo` (`gas/Code.js:454`). The pre-4.7
+backfill used explicit `period1`/`period2` spanning any requested window.
+`backfillDailySnapshots('2025-01-01')` now silently produces ~25 rows instead of
+~365, with no error — the same silent-shortfall class this revision exists to
+remove. Adequate for the gap-filling role D.7 leaves it, but the silence is the
+defect.
+
+Fix: thread a range/period argument through `getQuotes_` → `fetchYahooChartJson_`
+(cache key must include it), or have the backfill refuse a start date outside
+what it can actually cover.
+
+### A3 — Intraday label is a clock proxy (minor, accept)
+
+Coder flagged that `isLikelyIntraday` (`src/app.js:37`) derives from the Taipei
+wall clock rather than the server's `isClosed`. Audited: it is anchored on the
+**served** `sessionDate`, so on weekends and holidays `sessionDate !== today`
+and the label correctly stays hidden; pre-open it is also correct. It is wrong
+only on an early close (typhoon day, half session), where it shows an advisory
+string for a few hours. Cosmetic, degrades safely. **Accept as built.**
+
+### A4 — Per-ticker failure surfacing (accept)
+
+Coder read "surface in the response" as `getQuotes_`'s return rather than the
+HTTP wire, to honour the unchanged-wire-contract constraint. Correct call: a
+failed ticker is absent from the PriceMap, which the existing review notice
+(`src/app.js:152`) already reports to the user. **Accept.**
+
+### Stale docs to fix before Phase 4
+
+`design.md:118` and the old comment at `gas/Code.js:265` described the price
+column as `GOOGLEFINANCE`; it is `GET_TAIWAN_STOCK_PRICE`. The gas comment is
+now corrected by this revision; `design.md:118` (§A.5) still says GOOGLEFINANCE.
+
+### Phase 3 sign-off — Rev 4.7, 2026-09-20
+
+A1 and A2 re-audited after the coder's iteration 2. Verified independently:
+suite 129/129 green; `UrlFetchApp.fetchAll` in two batches (`.TW` pass, then a
+`.TWO` retry pass); cache key is `q_<code>_<range>`, closing the range-collision
+trap; `yahooRangeForDays_` sizes the backfill's request to its actual span;
+shortfalls now counted and logged.
+
+Measured against the real ledger (the coder's estimate of "46 held / close to 39
+coded" was wrong; it had no access to the live sheets):
+
+| | tickers fetched | round trips |
+|---|---|---|
+| Before Rev 4.7 | 0 (read cells) | 0 |
+| Rev 4.7 as first built | 39 | 45 sequential |
+| After A1 | 20 today, 24 after the code paste | **2 parallel** |
+| Backfill | 39 (all coded) | 2 parallel |
+
+The coder declined to narrow `backfillDailySnapshots` to held tickers. Correct
+call, and it should not be changed: the backfill anchors on HeldLots and walks
+*backwards* undoing trades, so past days legitimately hold since-sold positions
+that still need prices.
+
+**Accepted. A3/A4 stand as built.** Remaining before Phase 4: `fetchAll`'s
+same-order response contract is implemented to Google's documented behaviour but
+exercised only against a Node fake — confirm on the first live run. Prices tab
+code paste still outstanding (`backups/prices_tab_codes_2026-09-20.csv`).

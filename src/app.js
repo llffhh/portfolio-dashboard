@@ -21,6 +21,24 @@ function holdingsAt(trades, dateStr) {
   return pos;
 }
 
+// Rev 4.7 (design.md §D.2): the PriceMap wire contract carries no isClosed
+// flag (§A.5 unchanged), so this is a client-side proxy for it — a settled
+// close is inferred from the clock rather than served by the API. `priceToday`
+// coming back as an EARLIER calendar date than today (weekend/holiday) is
+// unambiguously settled; only "today's date, before TWSE's 13:30 close" reads
+// as intraday.
+function taipeiClockParts(d) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
+  }).formatToParts(d).reduce((o, p) => ((o[p.type] = p.value), o), {});
+  return { date: `${parts.year}-${parts.month}-${parts.day}`, hhmm: `${parts.hour}${parts.minute}` };
+}
+function isLikelyIntraday(sessionDateStr) {
+  const now = taipeiClockParts(new Date());
+  return sessionDateStr === now.date && Number(now.hhmm) < 1330;
+}
+
 // Value of the reconstructed position at a date, plus which held tickers had
 // no price there. `complete` = every held ticker priced, i.e. the figure is
 // trustworthy rather than silently understated.
@@ -169,6 +187,11 @@ async function init() {
 
     // MET-10 cards: current value, yesterday close value, delta
     document.getElementById('val-current').innerText = Math.round(currentVal).toLocaleString();
+    // D.2: Current Value legitimately differs from today's (not-yet-written)
+    // DailyHistory row while the session is still open — say so rather than
+    // let it look like a mismatch.
+    const noteEl = document.getElementById('val-current-note');
+    if (noteEl) noteEl.innerText = isLikelyIntraday(priceToday) ? "intraday — today's close not yet settled" : '';
     if (hasYesterday) {
       document.getElementById('val-yesterday').innerText = Math.round(yesterdayVal).toLocaleString();
       const delta = currentVal - yesterdayVal;
