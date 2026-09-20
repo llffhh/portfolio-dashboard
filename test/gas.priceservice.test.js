@@ -55,6 +55,30 @@ function yahooChart({ symbol, sessionDate, sessionHHMM = '1331', closesByDate })
   };
 }
 
+// A5: builds a captured-shape Yahoo `chart` payload with EXPLICIT per-bar
+// timestamps, unlike `yahooChart` above (which always stamps every historical
+// bar at the same 13:31). `bars` is chronological: [{date, hh, mm, close}, ...].
+// `meta.regularMarketTime` is the LAST bar's own timestamp, matching real
+// Yahoo (and what a phantom-unaware parse would use as sessionDate).
+function yahooChartWithBars(symbol, bars) {
+  const last = bars[bars.length - 1];
+  return {
+    chart: {
+      result: [{
+        meta: {
+          symbol,
+          regularMarketTime: taipeiEpochSeconds(last.date, last.hh, last.mm),
+          regularMarketPrice: last.close,
+          chartPreviousClose: 999999.99   // decoy — must never be read
+        },
+        timestamp: bars.map((b) => taipeiEpochSeconds(b.date, b.hh, b.mm)),
+        indicators: { quote: [{ close: bars.map((b) => b.close) }] }
+      }],
+      error: null
+    }
+  };
+}
+
 // ---- sandbox fakes ----
 
 function fakeFormatDate(date, tz, pattern) {
@@ -260,6 +284,118 @@ describe('Rev 4.7 — parseQuoteResponse_ / currentOf / prevCloseOf (pure helper
       'Asia/Taipei'
     );
     expect(ctx.prevCloseOf(bundle)).toBeNull();
+  });
+});
+
+describe('A5 — phantom trailing non-session bar (Phase 4 post-deploy fix, Architect fault per §D.1)', () => {
+  // Live-observed shape, 2026-09-20 (Sunday), 2330.TW, range=1mo&interval=1d:
+  //   Wed 09-16 09:00 close=2380 -> Thu 09-17 09:00 close=2425 -> Fri 09-18 09:00 close=2460
+  //   -> Sun 09-20 12:00 close=2460 (phantom: not a session, duplicates Friday, different time-of-day)
+  const REAL_BARS = [
+    { date: '2026-09-16', hh: 9, mm: 0, close: 2380 },
+    { date: '2026-09-17', hh: 9, mm: 0, close: 2425 },
+    { date: '2026-09-18', hh: 9, mm: 0, close: 2460 }
+  ];
+
+  it('T-a: non-trading day, phantom present -> current = last real close, prevClose = the session before it', () => {
+    const bars = [...REAL_BARS, { date: '2026-09-20', hh: 12, mm: 0, close: 2460 }];   // phantom: dup close, different time
+    const { ctx } = loadGas();
+    const bundle = ctx.parseQuoteResponse_(yahooChartWithBars('2330.TW', bars), 'Asia/Taipei');
+
+    // The phantom's own date never appears anywhere in the bundle.
+    expect(bundle.sessionDate).toBe('2026-09-18');
+    expect(bundle.closes['2026-09-20']).toBeUndefined();
+    expect(Object.keys(bundle.closes)).toEqual(['2026-09-16', '2026-09-17', '2026-09-18']);
+
+    expect(ctx.currentOf(bundle)).toBe(2460);      // Friday — unchanged, NOT regressed to Thursday
+    expect(ctx.prevCloseOf(bundle)).toBe(2425);    // Thursday, the session before Friday — not Friday itself
+    expect(bundle.isClosed).toBe(true);            // a resolved-to-real-prior-session bundle is always settled
+
+    // Observable: the decision is recorded on the bundle, not just inferred.
+    expect(bundle.phantomDropped).toEqual({
+      date: '2026-09-20', close: 2460, timeOfDay: '1200',
+      comparedTo: { date: '2026-09-18', close: 2460, timeOfDay: '0900' }
+    });
+  });
+
+  it('T-b: trading day, in-progress bar stamped 09:00 (same time-of-day as every other bar) -> nothing dropped', () => {
+    const bars = [...REAL_BARS, { date: '2026-09-21', hh: 9, mm: 0, close: 2500 }];   // live, different close, same stamp convention
+    const { ctx } = loadGas();
+    const bundle = ctx.parseQuoteResponse_(yahooChartWithBars('2330.TW', bars), 'Asia/Taipei');
+
+    expect(bundle.phantomDropped).toBeNull();
+    expect(bundle.sessionDate).toBe('2026-09-21');
+    expect(ctx.currentOf(bundle)).toBe(2500);      // live
+    expect(ctx.prevCloseOf(bundle)).toBe(2460);    // yesterday (Friday)
+  });
+
+  it('T-c: trading day, in-progress bar stamped at tick time (differs from the modal 09:00) -> nothing dropped', () => {
+    const bars = [...REAL_BARS, { date: '2026-09-21', hh: 10, mm: 37, close: 2475 }];   // live, close DIFFERS from Friday's
+    const { ctx } = loadGas();
+    const bundle = ctx.parseQuoteResponse_(yahooChartWithBars('2330.TW', bars), 'Asia/Taipei');
+
+    // Time-of-day differs from the preceding bar (like the phantom), but the
+    // close does NOT match — condition (a) fails, so it is NOT flagged.
+    expect(bundle.phantomDropped).toBeNull();
+    expect(bundle.sessionDate).toBe('2026-09-21');
+    expect(ctx.currentOf(bundle)).toBe(2475);      // live
+    expect(ctx.prevCloseOf(bundle)).toBe(2460);    // yesterday (Friday)
+  });
+
+  it('T-d: live bar\'s close coincidentally equals yesterday\'s, on a trading day -> nothing dropped', () => {
+    // Same stamping convention as every other bar (09:00) — close matches by
+    // coincidence, but time-of-day does NOT differ, so condition (b) fails.
+    const bars = [...REAL_BARS, { date: '2026-09-21', hh: 9, mm: 0, close: 2460 }];
+    const { ctx } = loadGas();
+    const bundle = ctx.parseQuoteResponse_(yahooChartWithBars('2330.TW', bars), 'Asia/Taipei');
+
+    expect(bundle.phantomDropped).toBeNull();
+    expect(bundle.sessionDate).toBe('2026-09-21');
+    expect(ctx.currentOf(bundle)).toBe(2460);      // live (coincidentally == Friday's close)
+    expect(ctx.prevCloseOf(bundle)).toBe(2460);    // Friday — a real, un-dropped value
+
+    // NOTE (unresolved, flagged for the weekday follow-up): this specific
+    // fixture pairs the coincidental-close scenario with the 09:00 stamping
+    // convention (T-b's hypothesis). If a live trading day instead stamps its
+    // in-progress bar at TICK time (T-c's hypothesis, also observed-possible)
+    // AND that tick's close happens to coincide with yesterday's close, BOTH
+    // discriminator conditions would hold simultaneously and this bar would be
+    // (mis)classified as a phantom. This combination cannot be distinguished
+    // from a real non-trading-day phantom using only (close match + time-of-
+    // day mismatch) — it is the one gap the coordinator explicitly flagged as
+    // unprovable before a weekday observation of live intraday stamping.
+  });
+
+  it('detectPhantomTrailingBar_: fewer than 2 points -> never flagged (nothing to compare against)', () => {
+    const { ctx } = loadGas();
+    expect(ctx.detectPhantomTrailingBar_([], 'Asia/Taipei')).toBeNull();
+    expect(ctx.detectPhantomTrailingBar_([{ ts: taipeiEpochSeconds('2026-09-18', 9, 0), close: 2460 }], 'Asia/Taipei')).toBeNull();
+  });
+
+  it('getQuotes_ logs the phantom decision, symbol-tagged, so a weekday run can confirm it without guessing', () => {
+    const bars = [...REAL_BARS, { date: '2026-09-20', hh: 12, mm: 0, close: 2460 }];
+    const { ctx, logs } = loadGas({ urlResponses: { '2330.TW': yahooChartWithBars('2330.TW', bars) } });
+    ctx.getQuotes_({ '台積電': '2330' });
+    expect(logs.some((l) => l.includes('dropped phantom') && l.includes('2330.TW') && l.includes('2026-09-20'))).toBe(true);
+  });
+
+  it('the §D.2 invariant survives a phantom day: getPricesFromSheet and recordDailySnapshot agree', () => {
+    const bars = [...REAL_BARS, { date: '2026-09-20', hh: 12, mm: 0, close: 2460 }];
+    const sheets = {
+      HeldLots: makeSheet(heldLotsSheetRows([['台積電', 1000]])),
+      Prices: makeSheet(pricesSheetRows([['台積電', 2330, '', '']]))
+    };
+    const { ctx } = loadGas({ sheets, urlResponses: { '2330.TW': yahooChartWithBars('2330.TW', bars) } });
+
+    ctx.recordDailySnapshot();
+    const history = sheets.DailyHistory._rows;
+    expect(history[1][0]).toBe('2026-09-18');     // stamped under the REAL session date, not the phantom's
+    expect(history[1][1]).toBe(1000 * 2460);
+
+    const priceMap = ctx.getPricesFromSheet(['台積電'], []);
+    expect(priceMap['台積電']['2026-09-18']).toBe(2460);
+    expect(priceMap['台積電']['closeyest']).toBe(2425);
+    expect(1000 * priceMap['台積電']['2026-09-18']).toBe(history[1][1]);
   });
 });
 

@@ -793,3 +793,155 @@ that still need prices.
 same-order response contract is implemented to Google's documented behaviour but
 exercised only against a Node fake — confirm on the first live run. Prices tab
 code paste still outstanding (`backups/prices_tab_codes_2026-09-20.csv`).
+
+### Phase 4 — post-deploy finding: A5, phantom non-session bar (REGRESSION)
+
+Apps Script deployed 2026-09-20 (version 11 -> new version; rollback point 11,
+backup in `backups/gas-20260920-150716/`). `deploy.mjs` step 6 threw instead of
+returning problems — `verify()` does not catch a JSON parse failure, so the
+transient HTML burst bypassed BOTH its retry loop and its auto-rollback. The
+deploy landed un-rolled-back. Manual end-to-end verification then passed:
+ledger row counts all match baseline, all 24 held tickers priced, and the §D.2
+invariant holds live (Current Value 5,484,729 == last DailyHistory row, diff 0).
+
+**But:** Yahoo appends a trailing bar dated the CURRENT day even on a
+non-trading day, carrying the previous session's close:
+
+```
+Fri, 2026-09-18, 09:00  close=2460  volume=35,352,856
+Sun, 2026-09-20, 12:00  close=2460  volume=5,242,511
+```
+
+Real daily bars are stamped at the session open (09:00 Taipei); this one is
+stamped at the current market time. So on a weekend/holiday `sessionDate`
+becomes a non-session date and `prevCloseOf` returns the last REAL close —
+which the phantom bar duplicates. **Yesterday Value therefore equals Current
+Value and the delta card reads 0 on every non-trading day.** Verified live:
+delta 0 where it should be Friday(2460) vs Thursday(2425).
+
+This is a regression against pre-4.7 behaviour, and it is an Architect fault:
+§D.1 defined `prevClose` as "the latest date strictly before `sessionDate`"
+without anticipating that Yahoo emits non-session bars. Current Value and
+DailyHistory are unaffected — both read the right number.
+
+Proposed fix: keep only bars stamped at the modal (session-open) time-of-day
+and drop the rest, so `closes` contains sessions only. On a trading day nothing
+is dropped (the in-progress bar is itself stamped at the open); on a
+non-trading day the phantom goes. **Caveat: the trading-day branch could not be
+observed — 2026-09-20 is a Sunday — so it needs confirming on a weekday.**
+
+### Iteration 3 — 2026-09-20 (Phase 4 fix-forward: A5 phantom bar, A6 deploy.mjs verify())
+**Triggered by:** coordinator message after live post-deploy verification found
+A5 (regression, Architect fault per §D.1) and A6 (deploy.mjs's `verify()`
+swallowing a JSON-parse failure and bypassing its own retry/rollback). User
+approved fixing forward. **Not deployed, not committed** — HEAD stays at
+`22920dd`; the coordinator verifies and handles the redeploy.
+
+**A5 — discriminator chosen, and why:** the two-condition rule the coordinator
+suggested, implemented exactly as given: a trailing bar is a phantom iff (a)
+its close exactly equals the immediately preceding bar's close, AND (b) its
+Taipei time-of-day differs from the immediately preceding bar's. Only the
+single last bar is ever checked, against its one predecessor. New pure helper
+`detectPhantomTrailingBar_(points, tz)` in `gas/Code.js` implements the rule in
+isolation (directly unit-tested); `parseQuoteResponse_` calls it, and when a
+phantom is found: its date is never added to `closes`, and `sessionDate` is
+recomputed from the last REAL point's timestamp instead of
+`meta.regularMarketTime` (which IS the phantom's own timestamp) — otherwise
+`current = closes[sessionDate]` would resolve to nothing at all. `isClosed` is
+forced `true` whenever a phantom was dropped, since falling back to a real
+prior session means that session is by definition already settled — this also
+happens to fix a related latent risk: `recordDailySnapshot` running on a
+weekend now correctly re-resolves to Friday and idempotently re-upserts
+Friday's existing row, instead of being at the mercy of whatever time-of-day
+Yahoo's phantom happened to carry that day for its stale isClosed gate.
+`fetchQuoteBatch_` (the one impure caller) logs `bundle.phantomDropped`
+per-symbol via `Logger.log` when present, satisfying "make the decision
+observable... from the Apps Script log without guessing."
+
+**T-a..T-d (test/gas.priceservice.test.js, new `describe('A5 — ...')` block,
+8 tests):**
+- T-a (non-trading day, phantom present): PASS. `sessionDate` resolves to
+  Friday, `closes` has no Sunday key at all, `currentOf` = 2460 (Friday,
+  unregressed), `prevCloseOf` = 2425 (Thursday — the session before Friday,
+  not Friday itself), `isClosed` = true, and `bundle.phantomDropped` carries
+  the full diagnostic record asserted verbatim.
+- T-b (trading day, in-progress bar stamped 09:00 — same time-of-day as every
+  other bar): PASS. Condition (b) is false (no time-of-day difference from the
+  modal 09:00 convention), so nothing is dropped regardless of any close
+  match; current = live, prevClose = yesterday.
+- T-c (trading day, in-progress bar stamped at tick time, close DIFFERENT from
+  yesterday's): PASS. Condition (a) is false, so nothing is dropped regardless
+  of the time-of-day mismatch; current = live, prevClose = yesterday.
+- T-d (live bar's close coincidentally equals yesterday's, on a trading day):
+  PASS, **but only under the 09:00-stamping hypothesis** (paired with T-b's
+  convention, where condition (b) is false so the AND never fires). Also added
+  a direct `detectPhantomTrailingBar_` unit test (fewer than 2 points -> always
+  null) and two integration tests: `getQuotes_` logs the phantom decision
+  symbol-tagged, and the full §D.2 invariant (`getPricesFromSheet` /
+  `recordDailySnapshot` agreement) survives a phantom day end-to-end.
+
+**What remains unproven until a weekday observation (named explicitly, not
+glossed over):** whether Yahoo stamps a TRADING day's in-progress bar at
+09:00 (session open, T-b) or at the current tick time (T-c) is still unknown —
+today is Sunday, same constraint the coordinator flagged, and nothing in this
+fix round could resolve it either, since it requires observing a live market-
+open session. Concretely: **if a trading day's in-progress bar is stamped at
+tick time (T-c's hypothesis) AND its live price happens to coincidentally
+equal yesterday's close (T-d's scenario) at the same time, both discriminator
+conditions hold simultaneously and this fix would misclassify that live bar as
+a phantom** — an unavoidable ambiguity from the payload alone, since that
+exact signature (close match + time-of-day mismatch) is indistinguishable from
+a genuine phantom without an external trading-calendar. This is the same gap
+the coordinator named upfront ("I cannot prove the time-of-day rule alone").
+Recommend confirming Yahoo's intraday stamping convention on the next trading
+day and watching the `fetchQuoteBatch_: dropped phantom...` log line for any
+unexpected trigger during market hours.
+
+**A6 — deploy.mjs `verify()`:** `getJson`/`postJson` now go through a shared
+`fetchJson(url, opts)` that reads the response as text first and only then
+`JSON.parse`s it; a parse failure throws a new `UnparseableResponseError`
+(carries HTTP status + a 120-char snippet of the actual body) instead of
+letting a bare `SyntaxError` propagate from `res.json()`. `verify()`'s entire
+body is now wrapped in one try/catch: any failure — `UnparseableResponseError`
+specifically, or anything else unexpected — is turned into a `problems.push(...)`
+entry and `verify()` returns normally, never throws. The two problem classes
+are worded distinctly per the coordinator's instruction: a transport/parse
+failure reads `"verify: transport error, endpoint did not return JSON
+(retryable) — HTTP <status>..."`, while a well-formed-but-wrong response still
+reads as the existing `"<resource>: N rows before, M after"` / `"POST save
+returned ..."` style messages — a human scanning `problems` never has to guess
+which kind occurred. This restores `main()`'s existing 4-attempt retry loop
+and its auto-rollback-on-exhaustion, both of which the old code bypassed
+entirely (the throw propagated straight to `main().catch(e => die(e.message))`,
+never reaching either).
+
+**No automated test added for `deploy.mjs`** — it has none today (pre-existing
+condition, not introduced by me), and it cannot safely be given one without a
+separate structural change: the file executes `main()` unconditionally at
+`import.meta.url` load time (`main().catch(...)` at the bottom, no entry-point
+guard), and `config.js` in this working tree holds the real live Apps Script
+URL/key — literally `import`-ing `gas/deploy.mjs` from a test file would
+attempt real network calls (and, if run without the right flags, a real
+deploy) against production. Adding an entry-point guard so the file becomes
+safely importable felt like a bigger structural change than the requested fix.
+Instead: copied the new `fetchJson`/`getJson`/`postJson`/`verify` logic
+verbatim into a throwaway Node script (outside the repo, in this session's
+scratchpad, never committed) driven against a scripted fake `global.fetch`,
+and confirmed by running it: (1) `verify()` never throws when every fetch
+returns an HTML error page; (2) a simulated copy of `main()`'s retry loop
+reaches its 4th attempt instead of dying on the first; (3) a well-formed-but-
+wrong JSON response is worded as a data mismatch, never as a transport error.
+This is a real dynamic check of the exact logic now in `gas/deploy.mjs` (same
+source text), just not an automated regression test living in the repo.
+**Flagging for the coordinator:** if ongoing automated coverage for
+`deploy.mjs` is wanted, it needs that entry-point-guard refactor first — happy
+to do it as a separate, explicitly-scoped change rather than folding it
+silently into this fix.
+
+**Full suite:** 136/136 green (129 before this round + 7 new: 4 T-a..T-d +
+`detectPhantomTrailingBar_` unit test + `getQuotes_` phantom-log test + the
+§D.2-invariant-survives-a-phantom-day integration test). `node --check` clean
+on both `gas/Code.js` and `gas/deploy.mjs`.
+
+**Files changed this iteration:** `gas/Code.js`, `test/gas.priceservice.test.js`,
+`gas/deploy.mjs`, `task.md` (this section). Nothing else.

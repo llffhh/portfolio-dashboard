@@ -358,6 +358,46 @@ function getPricesFromSheet(tickers, dates) {
 var PRICE_CACHE_LIVE_TTL = 300;     // §D.3: seconds, while the session is open
 var PRICE_CACHE_MAX_TTL = 21600;    // CacheService's hard per-put ceiling (6h)
 
+// Pure (A5 — Phase 4 post-deploy fix, Architect fault per §D.1, not a Coder
+// bug): Yahoo appends a trailing bar dated the CURRENT day even on a
+// non-trading day, carrying the previous real session's close verbatim.
+// Verified live 2026-09-20 (a Sunday), 2330.TW, range=1mo&interval=1d:
+//   Fri 2026-09-18 09:00  close=2460
+//   Sun 2026-09-20 12:00  close=2460   <- phantom: not a session
+// Two signals together, neither alone (a coincidental close match on a real
+// trading day, or a real bar simply timestamped differently, must NOT be
+// dropped):
+//   (a) its close exactly equals the immediately preceding bar's close, AND
+//   (b) its Taipei time-of-day differs from the immediately preceding bar's.
+// Only the LAST bar is ever checked against its one predecessor — Yahoo has
+// only ever been observed to append a single trailing phantom, never more.
+//
+// @param {Array<{ts:number, close:number}>} points chronological, non-null closes.
+// @return {{date:string, close:number, timeOfDay:string,
+//           comparedTo:{date:string, close:number, timeOfDay:string}}|null}
+//   Diagnostic record if the last point is a phantom, else null. The caller
+//   (fetchQuoteBatch_) logs this so the classification is confirmable from
+//   the Apps Script execution log, not just inferred.
+function detectPhantomTrailingBar_(points, tz) {
+  if (!points || points.length < 2) return null;   // nothing to compare against
+  var last = points[points.length - 1];
+  var prev = points[points.length - 2];
+  var lastTod = Utilities.formatDate(new Date(last.ts * 1000), 'Asia/Taipei', 'HHmm');
+  var prevTod = Utilities.formatDate(new Date(prev.ts * 1000), 'Asia/Taipei', 'HHmm');
+  if (last.close !== prev.close || lastTod === prevTod) return null;   // (a) AND (b), both required
+
+  return {
+    date: Utilities.formatDate(new Date(last.ts * 1000), tz, 'yyyy-MM-dd'),
+    close: last.close,
+    timeOfDay: lastTod,
+    comparedTo: {
+      date: Utilities.formatDate(new Date(prev.ts * 1000), tz, 'yyyy-MM-dd'),
+      close: prev.close,
+      timeOfDay: prevTod
+    }
+  };
+}
+
 // Pure: builds a QuoteBundle from one already-fetched Yahoo `chart` JSON
 // payload. No network/Sheet access, so this is exercised directly in a Node
 // sandbox (test/gas.priceservice.test.js) against captured payloads.
@@ -369,23 +409,45 @@ function parseQuoteResponse_(json, tz) {
   var closeArr = quote && quote.close;
   if (!closeArr) return null;
 
-  var closes = {};
+  // Non-null (timestamp, close) points in order — T1 still drops nulls, and
+  // this is also what the phantom check (A5) walks.
+  var points = [];
   for (var i = 0; i < result.timestamp.length; i++) {
     var c = closeArr[i];
     if (c == null) continue;   // null closes dropped (T1)
-    var d = Utilities.formatDate(new Date(result.timestamp[i] * 1000), tz, 'yyyy-MM-dd');
-    closes[d] = c;
+    points.push({ ts: result.timestamp[i], close: c });
   }
 
-  var sessionTs = new Date(result.meta.regularMarketTime * 1000);
+  var phantom = detectPhantomTrailingBar_(points, tz);
+  // A5: the phantom's own date is dropped entirely — never a key in `closes`,
+  // never `sessionDate` — so `current`/`prevClose` fall back to the last REAL
+  // session and the one before it, exactly as if Yahoo had never appended it.
+  var effectivePoints = phantom ? points.slice(0, -1) : points;
+  if (effectivePoints.length === 0) return null;   // only ever had a phantom — nothing usable
+
+  var closes = {};
+  for (var j = 0; j < effectivePoints.length; j++) {
+    var d = Utilities.formatDate(new Date(effectivePoints[j].ts * 1000), tz, 'yyyy-MM-dd');
+    closes[d] = effectivePoints[j].close;
+  }
+
+  // sessionDate normally comes from meta.regularMarketTime, but that IS the
+  // phantom's own timestamp when one was dropped — use the last REAL point's
+  // timestamp instead, or `current`/`isClosed` would resolve against a date
+  // with no entry in `closes` at all.
+  var sessionSourceTs = phantom
+    ? effectivePoints[effectivePoints.length - 1].ts
+    : result.meta.regularMarketTime;
+  var sessionTs = new Date(sessionSourceTs * 1000);
   var sessionDate = Utilities.formatDate(sessionTs, tz, 'yyyy-MM-dd');
   // TWSE/TPEx close 13:30 Taipei; isClosed is ALWAYS judged on Taipei local
   // time regardless of `tz` (the sheet's timezone) — the exchange doesn't
-  // move (T2).
-  var hhmm = Utilities.formatDate(sessionTs, 'Asia/Taipei', 'HHmm');
-  var isClosed = Number(hhmm) >= 1330;
+  // move (T2). A resolved-to-a-real-prior-session bundle (phantom dropped) is
+  // by construction a COMPLETED session, so isClosed is unconditionally true —
+  // there's no "still trading" state for a day that already ended.
+  var isClosed = phantom ? true : Number(Utilities.formatDate(sessionTs, 'Asia/Taipei', 'HHmm')) >= 1330;
 
-  return { sessionDate: sessionDate, isClosed: isClosed, closes: closes };
+  return { sessionDate: sessionDate, isClosed: isClosed, closes: closes, phantomDropped: phantom || null };
 }
 
 // Pure (T3): current = closes[sessionDate], per §D.1 — never meta.regularMarketPrice.
@@ -496,10 +558,17 @@ function fetchQuoteBatch_(symbols, range, tz) {
   } catch (e) {
     return symbols.map(function () { return null; });
   }
-  return responses.map(function (response) {
+  return responses.map(function (response, i) {
     try {
       if (!response || response.getResponseCode() !== 200) return null;
-      return parseQuoteResponse_(JSON.parse(response.getContentText()), tz);
+      var bundle = parseQuoteResponse_(JSON.parse(response.getContentText()), tz);
+      // A5: make the phantom-drop decision observable in the execution log —
+      // confirmable on a weekday run without guessing at what happened.
+      if (bundle && bundle.phantomDropped) {
+        Logger.log('fetchQuoteBatch_: dropped phantom non-session bar for ' + symbols[i] + ': '
+                   + JSON.stringify(bundle.phantomDropped));
+      }
+      return bundle;
     } catch (e) {
       return null;
     }

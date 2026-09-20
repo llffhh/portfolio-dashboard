@@ -85,16 +85,37 @@ async function loadConfig() {
   return { url: c.WEBAPP_URL, key: c.API_KEY, deploymentId: m[1] };
 }
 
+// A6 (Phase 4 post-deploy fix): Apps Script intermittently serves an HTML
+// error page after a request burst instead of JSON. That is a TRANSPORT
+// problem, distinct from the endpoint answering with well-formed JSON that is
+// simply wrong — callers that need to tell the two apart (verify(), below)
+// catch this type specifically instead of treating every failure alike.
+class UnparseableResponseError extends Error {
+  constructor(status, snippet) {
+    super(`HTTP ${status}, response was not valid JSON: "${snippet}"`);
+    this.name = 'UnparseableResponseError';
+    this.status = status;
+  }
+}
+
+async function fetchJson(url, opts) {
+  const res = await fetch(url, opts);
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw new UnparseableResponseError(res.status, text.slice(0, 120).replace(/\s+/g, ' '));
+  }
+}
+
 async function getJson(cfg, params, key = cfg.key) {
   const qs = new URLSearchParams({ key, ...params }).toString();
-  const res = await fetch(`${cfg.url}?${qs}`);
-  return res.json();
+  return fetchJson(`${cfg.url}?${qs}`);
 }
 
 async function postJson(cfg, body) {
   // text/plain, no custom headers: the same "simple request" shape the browser sends.
-  const res = await fetch(cfg.url, { method: 'POST', body: JSON.stringify(body) });
-  return res.json();
+  return fetchJson(cfg.url, { method: 'POST', body: JSON.stringify(body) });
 }
 
 // Row counts only — never the data itself.
@@ -109,37 +130,57 @@ async function snapshot(cfg) {
 
 async function verify(cfg, baseline) {
   const problems = [];
-  const now = await snapshot(cfg);
-  for (const [r, n] of Object.entries(baseline)) {
-    // The daily-snapshot trigger may legitimately append one row mid-deploy.
-    const ok = r === 'dailyhistory' ? now[r] === n || now[r] === n + 1 : now[r] === n;
-    if (!ok) problems.push(`${r}: ${n} rows before, ${now[r]} after`);
+  // A6 (Phase 4 post-deploy fix): the whole body is wrapped so a transport or
+  // JSON-parse failure anywhere in here becomes a PROBLEM ENTRY, never a
+  // thrown exception — an exception here used to propagate straight past
+  // both the 4-attempt retry loop AND the auto-rollback in main(), landing an
+  // unverified, un-rolled-back deploy. Whatever problems were already
+  // collected before the failure are kept, so a partial run still reports
+  // what it saw.
+  try {
+    const now = await snapshot(cfg);
+    for (const [r, n] of Object.entries(baseline)) {
+      // The daily-snapshot trigger may legitimately append one row mid-deploy.
+      const ok = r === 'dailyhistory' ? now[r] === n || now[r] === n + 1 : now[r] === n;
+      if (!ok) problems.push(`${r}: ${n} rows before, ${now[r]} after`);
+    }
+
+    const list0 = await getJson(cfg, { resource: 'sellplans' });
+    if (!Array.isArray(list0)) {
+      problems.push(`GET sellplans returned ${JSON.stringify(list0)} (new version not being served?)`);
+      return problems;
+    }
+
+    const id = `deploycheck_${Date.now()}`;
+    const probe = {
+      id, name: 'deploy check (safe to delete)', savedAt: new Date().toISOString(),
+      strategyId: 'custom', locked: [], rows: [], note: 'written and removed by gas/deploy.mjs'
+    };
+    const saved = await postJson(cfg, { key: cfg.key, action: 'save', scenario: probe });
+    if (!saved || saved.ok !== true) problems.push(`POST save returned ${JSON.stringify(saved)}`);
+    const list1 = await getJson(cfg, { resource: 'sellplans' });
+    if (!Array.isArray(list1) || !list1.some((s) => s.id === id)) problems.push('saved probe not visible in the list');
+    const del = await postJson(cfg, { key: cfg.key, action: 'delete', id });
+    if (!del || del.deleted !== true) problems.push(`POST delete returned ${JSON.stringify(del)}`);
+    const list2 = await getJson(cfg, { resource: 'sellplans' });
+    if (Array.isArray(list2) && list2.some((s) => s.id === id)) problems.push('probe still present after delete');
+
+    const badPost = await postJson(cfg, { key: 'wrong-key', action: 'save', scenario: probe });
+    if (!badPost || badPost.error !== 'unauthorized') problems.push('a wrong-key POST was not refused');
+    const badGet = await getJson(cfg, { resource: 'heldlots' }, 'wrong-key');
+    if (!badGet || badGet.error !== 'unauthorized') problems.push('a wrong-key GET was not refused');
+  } catch (e) {
+    // Distinguish "endpoint returned HTML/unparseable" (transport — likely
+    // transient, worth the retry loop's remaining attempts) from "endpoint
+    // returned JSON that is wrong" (the data-mismatch problems pushed above,
+    // which read as "<resource>: N rows before, M after" etc.) — a human
+    // scanning `problems` should never have to guess which kind occurred.
+    if (e instanceof UnparseableResponseError) {
+      problems.push(`verify: transport error, endpoint did not return JSON (retryable) — ${e.message}`);
+    } else {
+      problems.push(`verify: unexpected error (retryable) — ${e.message}`);
+    }
   }
-
-  const list0 = await getJson(cfg, { resource: 'sellplans' });
-  if (!Array.isArray(list0)) {
-    problems.push(`GET sellplans returned ${JSON.stringify(list0)} (new version not being served?)`);
-    return problems;
-  }
-
-  const id = `deploycheck_${Date.now()}`;
-  const probe = {
-    id, name: 'deploy check (safe to delete)', savedAt: new Date().toISOString(),
-    strategyId: 'custom', locked: [], rows: [], note: 'written and removed by gas/deploy.mjs'
-  };
-  const saved = await postJson(cfg, { key: cfg.key, action: 'save', scenario: probe });
-  if (!saved || saved.ok !== true) problems.push(`POST save returned ${JSON.stringify(saved)}`);
-  const list1 = await getJson(cfg, { resource: 'sellplans' });
-  if (!Array.isArray(list1) || !list1.some((s) => s.id === id)) problems.push('saved probe not visible in the list');
-  const del = await postJson(cfg, { key: cfg.key, action: 'delete', id });
-  if (!del || del.deleted !== true) problems.push(`POST delete returned ${JSON.stringify(del)}`);
-  const list2 = await getJson(cfg, { resource: 'sellplans' });
-  if (Array.isArray(list2) && list2.some((s) => s.id === id)) problems.push('probe still present after delete');
-
-  const badPost = await postJson(cfg, { key: 'wrong-key', action: 'save', scenario: probe });
-  if (!badPost || badPost.error !== 'unauthorized') problems.push('a wrong-key POST was not refused');
-  const badGet = await getJson(cfg, { resource: 'heldlots' }, 'wrong-key');
-  if (!badGet || badGet.error !== 'unauthorized') problems.push('a wrong-key GET was not refused');
   return problems;
 }
 
