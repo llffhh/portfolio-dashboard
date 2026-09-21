@@ -802,7 +802,8 @@ returning problems — `verify()` does not catch a JSON parse failure, so the
 transient HTML burst bypassed BOTH its retry loop and its auto-rollback. The
 deploy landed un-rolled-back. Manual end-to-end verification then passed:
 ledger row counts all match baseline, all 24 held tickers priced, and the §D.2
-invariant holds live (Current Value 5,484,729 == last DailyHistory row, diff 0).
+invariant holds live (Current Value == last DailyHistory row exactly, diff 0).
+(Absolute portfolio figures deliberately omitted — this repo is public.)
 
 **But:** Yahoo appends a trailing bar dated the CURRENT day even on a
 non-trading day, carrying the previous session's close:
@@ -1037,3 +1038,41 @@ was asked directly.
 
 **Files changed this iteration:** `gas/Code.js`, `test/gas.priceservice.test.js`,
 `task.md` (this section). `design.md` was read, not edited.
+
+### Phase 4 — CLOSED. Deployed 2026-09-21, Apps Script version 13
+
+`node gas/deploy.mjs` -> `✓ Live on version 13`, step-6 verification passed
+cleanly (rollback: `--rollback 12`; backup `backups/gas-20260920-164042/`).
+
+Step 2 confirmed the earlier deduction: live code had been `22920dd` (Rev 4.7).
+4.7.1 and 4.7.2 existed only in local git and had never reached the script
+project — the two intervening "deploy" attempts never ran `deploy.mjs` (no
+backup directory was created, which step 1 always does).
+
+Live verification, all held tickers priced, ledger row counts unchanged:
+
+| | v12 (Rev 4.7) | v13 (Rev 4.7.2) |
+|---|---|---|
+| sessionDate | 2026-09-20 (phantom) | 2026-09-18 (Friday) |
+| Current Value | Friday's close | Friday's close (unchanged) |
+| Yesterday Value | **equal to Current Value** | Thursday's close |
+| delta | **0 (the bug)** | a full session's move |
+| §D.2 invariant | diff 0 | diff 0 |
+
+(Absolute figures omitted — public repo. They were checked and are in the
+session record.)
+
+### A8 — historical DailyHistory rows are measurably wrong (expected, quantified)
+
+The newly-correct Yesterday Value (Thursday's close) and the stored
+DailyHistory row for 2026-09-17 disagree by **about 2.2%**, the stored row
+being the higher. Both value the same position at the same session, so the stored row is wrong by
+that much. It was written by the old trigger from a stale cached Prices cell,
+which is exactly the §D.0 defect.
+
+This is not a regression and needs no action: the user chose fix-forward, so
+pre-2026-09-21 rows were always known-untrustworthy. It is recorded because it
+is the first hard measurement of the old bug's magnitude on a real row, and
+because anyone reading the daily chart should know the pre-fix segment is low
+by an unpredictable amount, not merely "approximate". Rows written from
+2026-09-21 onward derive from the same array as the cards.
