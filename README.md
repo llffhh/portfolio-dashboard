@@ -8,7 +8,11 @@ Live: <https://llffhh.github.io/portfolio-dashboard/>
 
 ## What it shows
 
-**Cards** — Current Value, Yesterday Close Value (with ▲/▼ delta), Invested Capital, Cost of Holdings (the ROI and Simple CAGR denominator), Total Dividends, ROI and Simple CAGR (lots still held, with the dividends those lots paid), Account ROI and Account CAGR (all money deposited vs. current value + all money withdrawn), XIRR.
+**Cards**, in four groups:
+- *Value today* — Current Value (with ▲/▼ delta), Yesterday Close.
+- *Dividends* — Total Dividends, Yield on Cost.
+- *Current holdings* (lots still held) — Cost of Holdings, ROI and Simple CAGR (with the dividends those lots paid).
+- *Whole account* (all money in and out) — Net Invested Capital (deposited − withdrawn), Account ROI, Account CAGR, XIRR.
 
 **Charts** — Portfolio Value Over Time (Yearly / Daily toggle), Dividends per Year, Invested Capital per Year (with cumulative overlay), Yearly P/L excluding dividends, split into realized (sales, at average cost) and unrealized (change in paper gain on shares still held).
 

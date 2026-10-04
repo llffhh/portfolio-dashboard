@@ -1,5 +1,14 @@
 # Changelog
 
+## [Rev 4.9.1] - Dashboard cards grouped (2026-10-04)
+
+### Changed
+- The metric cards are grouped under four headings — Value today, Dividends, Current
+  holdings, Whole account — so each return figure sits beside the base it is measured
+  against. Each card's caption now states its formula.
+- Invested Capital is renamed **Net Invested Capital** and shows its deposited and
+  withdrawn parts, since it goes negative once withdrawals exceed deposits.
+
 ## [Rev 4.9] - Yearly P/L split into realized and unrealized (2026-10-04)
 
 See design.md MET-12.

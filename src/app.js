@@ -214,6 +214,8 @@ async function init() {
     const matchedDivs = matchedDividends(lots, divs);
     const oldestLotDate = lots.length ? lots.map(l => l.date).sort()[0] : today;
     const { deposited, withdrawn } = accountFlows(deposits);
+    document.getElementById('val-invested-label').innerText =
+      `deposited ${deposited.toLocaleString()} − withdrawn ${withdrawn.toLocaleString()}`;
 
     document.getElementById('val-roi').innerText = pct(() => roi(currentVal, matchedDivs, cost));
     document.getElementById('val-cagr').innerText =
