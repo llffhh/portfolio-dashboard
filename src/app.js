@@ -4,8 +4,9 @@ import { getConfig, saveConfig } from './settings.js?v=32';
 import {
   currentHoldings, costOfHoldings, investedCapital, currentValue,
   roi, xirr, simpleCagr, dividendsByYear, depositsByYear, yearlyPnL,
-  portfolioValueOverTime, buildXirrCashflows, yieldOnCost
-} from './metrics.js?v=33';
+  portfolioValueOverTime, buildXirrCashflows, yieldOnCost,
+  matchedDividends, accountFlows
+} from './metrics.js?v=34';
 import { initSellPlanner } from './sellplanner-ui.js?v=11';
 import { annualDividendFor } from './sellplanner.js?v=8';
 
@@ -202,23 +203,29 @@ async function init() {
       document.getElementById('val-yesterday').innerText = 'N/A';
     }
 
-    let computedRoi = 0;
-    try { computedRoi = roi(currentVal, totalDivs, cost); } catch(e) {}
-    document.getElementById('val-roi').innerText = (computedRoi * 100).toFixed(2) + '%';
+    const pct = (fn) => { try { return (fn() * 100).toFixed(2) + '%'; } catch (e) { return 'N/A'; } };
+    const yearsSince = (d) => (new Date(today) - new Date(d)) / (1000 * 60 * 60 * 24 * 365.25);
 
-    let computedXirr = 0;
-    try {
-      const flows = buildXirrCashflows(deposits, divs, [], currentVal, today);
-      computedXirr = xirr(flows);
-    } catch(e) {}
-    document.getElementById('val-xirr').innerText = (computedXirr * 100).toFixed(2) + '%';
+    // Rev 4.8 — two consistent views instead of one mixed one:
+    // Holdings (CF-2): the lots still held — their cost, value, and the dividends
+    //   they paid (MET-14), over the time since the oldest of them was bought.
+    // Account (CF-3): all money in vs. all money out. Dividends are not added —
+    //   they leave the account inside CD轉出 withdrawals (MET-15).
+    const matchedDivs = matchedDividends(lots, divs);
+    const oldestLotDate = lots.length ? lots.map(l => l.date).sort()[0] : today;
+    const { deposited, withdrawn } = accountFlows(deposits);
 
-    let computedCagr = 0;
-    try {
-      const years = (new Date(today) - new Date(firstDepositDate)) / (1000 * 60 * 60 * 24 * 365.25);
-      computedCagr = simpleCagr(invested, currentVal + totalDivs, years);
-    } catch(e) {}
-    document.getElementById('val-cagr').innerText = (computedCagr * 100).toFixed(2) + '%';
+    document.getElementById('val-roi').innerText = pct(() => roi(currentVal, matchedDivs, cost));
+    document.getElementById('val-cagr').innerText =
+      pct(() => simpleCagr(cost, currentVal + matchedDivs, yearsSince(oldestLotDate)));
+    document.getElementById('val-account-roi').innerText = pct(() => roi(currentVal, withdrawn, deposited));
+    document.getElementById('val-account-cagr').innerText =
+      pct(() => simpleCagr(deposited, currentVal + withdrawn, yearsSince(firstDepositDate)));
+
+    // CF-1 (Rev 4.8): dividends are already inside the CD轉出 withdrawals carried by
+    // `deposits`, so passing them again would count that cash twice.
+    document.getElementById('val-xirr').innerText =
+      pct(() => xirr(buildXirrCashflows(deposits, [], [], currentVal, today)));
 
     // Charts
     const divByYear = dividendsByYear(divs);
@@ -344,18 +351,26 @@ async function init() {
         }
       });
 
-      // MET-12: yearly P/L excluding dividends (current year = YTD, uses live value)
-      const pnl = yearlyPnL(valueByYear, invByYear);
+      // MET-12 (Rev 4.9): yearly P/L = realized (average cost) + unrealized, from
+      // Trades — deposits, withdrawals and dividends never enter (current year = YTD).
+      const { years: pnl } = yearlyPnL(trades, valueByYear);
       const pnlYears = Object.keys(pnl).sort();
+      const total = y => pnl[y].unrealized == null ? null : pnl[y].realized + pnl[y].unrealized;
       new Chart(document.getElementById('pnlChart'), {
-        type: 'bar',
         data: {
           labels: pnlYears.map(y => y === priceToday.substring(0, 4) ? `${y} YTD` : y),
-          datasets: [{
-            label: 'P/L (excl. dividends)',
-            data: pnlYears.map(y => pnl[y]),
-            backgroundColor: pnlYears.map(y => pnl[y] >= 0 ? '#dc2626' : '#16a34a')
-          }]
+          datasets: [
+            { type: 'line', label: 'Total P/L', data: pnlYears.map(total), borderColor: '#111827',
+              backgroundColor: '#111827', showLine: false, pointRadius: 4, stack: 'total', order: 0 },
+            { type: 'bar', label: 'Realized', data: pnlYears.map(y => pnl[y].realized),
+              backgroundColor: '#f59e0b', stack: 'pnl', order: 1 },
+            { type: 'bar', label: 'Unrealized', data: pnlYears.map(y => pnl[y].unrealized),
+              backgroundColor: '#60a5fa', stack: 'pnl', order: 1 }
+          ]
+        },
+        options: {
+          scales: { x: { stacked: true }, y: { stacked: true } },
+          interaction: { mode: 'index', intersect: false }
         }
       });
     } catch (e) {

@@ -14,7 +14,9 @@ import {
   depositsByYear,
   yearlyPnL,
   portfolioValueOverTime,
-  buildXirrCashflows
+  buildXirrCashflows,
+  matchedDividends,
+  accountFlows
 } from '../src/metrics.js';
 import { LocalJsonSource, MockPriceSource } from '../src/data.js';
 
@@ -149,12 +151,53 @@ describe('Acceptance Tests (design.md Section A)', () => {
       expect(Object.values(byYear).reduce((a, b) => a + b, 0)).toBe(3500);
     });
 
-    it('MET-12: yearlyPnL = V(y) − V(y−1) − invested(y); missing V omitted (rev 3.2)', () => {
-      const valueByYear = { '2020': 1200, '2021': 2500, '2022': null, '2023': 2600 };
-      const investedByYear = { '2020': 1000, '2021': 1000 };
-      const pnl = yearlyPnL(valueByYear, investedByYear);
-      // 2020: 1200-0-1000=200; 2021: 2500-1200-1000=300; 2022 omitted; 2023: 2600-2500-0=100
-      expect(pnl).toEqual({ '2020': 200, '2021': 300, '2023': 100 });
+    it('MET-12: yearlyPnL splits realized (average cost) + unrealized; sum = ΔV − buys + sells (rev 4.9)', () => {
+      const trades = [
+        { date: '2020-02-01', type: 'buy', ticker: 'A', shares: 100, amount: 1000 },
+        { date: '2020-06-01', type: 'buy', ticker: 'A', shares: 100, amount: 2000 },   // avg 15/share
+        { date: '2021-03-01', type: 'sell', ticker: 'A', shares: 50, amount: 1500 },   // cost 750
+        { date: '2021-03-01', type: 'buy', ticker: 'B ', shares: 10, amount: 500 },
+      ];
+      const { years, zeroCostSells } = yearlyPnL(trades, { '2020': 3600, '2021': 3200 });
+      // 2020: cost 3000 → unrealized 600; 2021: realized 1500−750=750,
+      // cost 2250+500=2750 → unrealized (3200−2750)−(3600−3000) = −150
+      expect(years).toEqual({
+        '2020': { realized: 0, unrealized: 600 },
+        '2021': { realized: 750, unrealized: -150 }
+      });
+      expect(zeroCostSells).toEqual([]);
+      // Identity with the trade-based total: ΔV − buys + sells
+      expect(years['2021'].realized + years['2021'].unrealized).toBe(3200 - 3600 - 500 + 1500);
+    });
+
+    it('MET-12: shares sold beyond those bought carry cost 0; same-day buy precedes sell', () => {
+      const trades = [
+        { date: '2020-01-10', type: 'sell', ticker: 'X', shares: 30, amount: 600 },
+        { date: '2020-01-10', type: 'buy', ticker: 'X', shares: 10, amount: 100 },
+      ];
+      const { years, zeroCostSells } = yearlyPnL(trades, { '2020': 0 });
+      // 10 shares at cost 100, 20 extra at 0 → realized 600 − 100 = 500
+      expect(years['2020']).toEqual({ realized: 500, unrealized: 0 });
+      expect(zeroCostSells).toEqual([{ date: '2020-01-10', ticker: 'X', shares: 20 }]);
+    });
+
+    it('MET-12: a year with no V has unrealized null and the next priced year spans the gap', () => {
+      const trades = [
+        { date: '2020-01-01', type: 'buy', ticker: 'A', shares: 10, amount: 1000 },
+        { date: '2021-05-01', type: 'sell', ticker: 'A', shares: 5, amount: 700 },
+      ];
+      const { years } = yearlyPnL(trades, { '2020': 1100, '2021': null, '2022': 900 });
+      expect(years['2021']).toEqual({ realized: 200, unrealized: null });
+      // (900 − 500) − (1100 − 1000) = 300
+      expect(years['2022']).toEqual({ realized: 0, unrealized: 300 });
+    });
+
+    it('MET-12: holdings before the first priced year-end ⇒ that year\'s unrealized is unknown', () => {
+      const trades = [{ date: '2019-01-01', type: 'buy', ticker: 'A', shares: 10, amount: 1000 }];
+      const { years } = yearlyPnL(trades, { '2020': 1200, '2021': 1500 });
+      expect(years['2019'].unrealized).toBeNull();
+      expect(years['2020'].unrealized).toBeNull();
+      expect(years['2021'].unrealized).toBe(300);
     });
 
     it('MET-8: dividendsByYear conservation', () => {
@@ -208,6 +251,47 @@ describe('Acceptance Tests (design.md Section A)', () => {
         { date: '2020-08-01', amount: 100 },
         { date: '2020-12-31', amount: 1100 }
       ]);
+    });
+  });
+
+  describe('A.2d Rev 4.8 matched-lot ROI & account return', () => {
+    it('MET-14: matchedDividends counts only held tickers, from their oldest held lot on', () => {
+      const lots = [
+        { date: '2021-01-10', ticker: 'A', cost: 1000 },
+        { date: '2020-06-01', ticker: ' A ', cost: 1000 },  // oldest A lot, padded name
+        { date: '2022-03-01', ticker: 'B', cost: 500 }
+      ];
+      const divs = [
+        { date: '2020-05-31', name: 'A', amount: 1 },    // before oldest held A lot
+        { date: '2020-06-01', name: 'A', amount: 10 },   // on the day — counts
+        { date: '2023-07-01', name: 'A ', amount: 20 },
+        { date: '2021-07-01', name: 'B', amount: 2 },    // earlier B lot, since sold
+        { date: '2023-07-01', name: 'B', amount: 30 },
+        { date: '2023-07-01', name: 'SOLD', amount: 4 }, // ticker no longer held
+        { date: '2023-07-01', name: null, amount: 8 }    // unnamed row
+      ];
+      expect(matchedDividends(lots, divs)).toBe(60);
+      expect(matchedDividends([], divs)).toBe(0);
+    });
+
+    it('MET-15: accountFlows splits CD轉入 (+) from CD轉出 (−) without netting', () => {
+      const deposits = [
+        { date: '2020-01-01', amount: 1000 },
+        { date: '2021-01-01', amount: 500 },
+        { date: '2022-01-01', amount: -2000 }
+      ];
+      expect(accountFlows(deposits)).toEqual({ deposited: 1500, withdrawn: 2000 });
+      // Withdrawals exceeding deposits: invested capital is negative, flows stay positive.
+      expect(investedCapital(deposits)).toBe(-500);
+    });
+
+    it('CF-3: account ROI / CAGR = roi / simpleCagr over deposited vs value + withdrawn', () => {
+      const { deposited, withdrawn } = accountFlows([
+        { date: '2020-01-01', amount: 1000 },
+        { date: '2021-01-01', amount: -500 }
+      ]);
+      expect(roi(710, withdrawn, deposited)).toBeCloseTo(0.21, 6);
+      expect(simpleCagr(deposited, 710 + withdrawn, 2)).toBeCloseTo(0.1, 6);
     });
   });
 

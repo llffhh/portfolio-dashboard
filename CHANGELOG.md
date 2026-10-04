@@ -1,5 +1,42 @@
 # Changelog
 
+## [Rev 4.9] - Yearly P/L split into realized and unrealized (2026-10-04)
+
+See design.md MET-12.
+
+### Changed
+- **Yearly P/L is now realized + unrealized, from Trades, at average cost.**
+  Realized = sale proceeds − average cost of the shares sold; unrealized = change in
+  (year-end value − cost of shares held). The chart stacks the two with a dot for the total.
+- **Fixed:** the old `V(y) − V(y−1) − deposits(y)` treated sale proceeds left in the
+  account as a loss, and their later withdrawal — dividends included — as a gain.
+  Deposits, withdrawals and dividends no longer enter the chart.
+- Shares sold with no matching buy in Trades (stock dividends, holdings from before the
+  ledger) are costed at 0.
+
+## [Rev 4.8] - Holdings vs. account returns (2026-10-04)
+
+See design.md A.2d / A.3 (MET-14, MET-15, CF-1..CF-3).
+
+### Fixed
+- **Simple CAGR showed 0% once withdrawals exceeded deposits.** Its base was Invested
+  Capital (CD轉入 net of CD轉出), which goes to zero or negative after large withdrawals;
+  `simpleCagr` then threw `E_CAGR_DOMAIN` and the card fell back to 0%. The base is now
+  Cost of Holdings.
+- **ROI counted dividends of positions already sold.** It added every dividend ever
+  received over the cost of lots still held, while the cost and realized gain of the sold
+  lots were left out. It now counts only dividends paid by held tickers since their
+  oldest held lot (`matchedDividends`). Simple CAGR uses the same dividends and runs from
+  the oldest held lot instead of the first deposit.
+- **XIRR counted dividends twice.** Dividends are paid into the account and leave inside
+  CD轉出 withdrawals, which XIRR already counts; they are no longer added separately.
+- A metric that cannot be computed now shows N/A instead of 0.00%.
+
+### Added
+- **Account ROI** `(V + withdrawn − deposited) / deposited` and **Account CAGR**
+  `((V + withdrawn) / deposited)^(1/years) − 1` from the first deposit — the whole
+  account, sold positions and realized gains included (`accountFlows`).
+
 ## [Rev 4.7] - Unified price service (2026-09-20)
 
 See design.md Section D. Current Value, Yesterday Value and DailyHistory now derive

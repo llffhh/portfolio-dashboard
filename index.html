@@ -93,7 +93,7 @@
       <div class="card">
         <h3>Cost of Holdings</h3>
         <div class="value" id="val-cost">-</div>
-        <div class="label">cost basis of lots still held — ROI denominator</div>
+        <div class="label">cost basis of lots still held — ROI &amp; CAGR denominator</div>
       </div>
       <div class="card">
         <h3>Total Dividends</h3>
@@ -107,15 +107,27 @@
       <div class="card">
         <h3>ROI</h3>
         <div class="value" id="val-roi">-</div>
-      </div>
-      <div class="card">
-        <h3>XIRR</h3>
-        <div class="value" id="val-xirr">-</div>
+        <div class="label">lots still held — value + their dividends vs. their cost</div>
       </div>
       <div class="card">
         <h3>Simple CAGR</h3>
         <div class="value" id="val-cagr">-</div>
-        <div class="label">approximate — ignores deposit timing</div>
+        <div class="label">lots still held, since the oldest was bought — approximate</div>
+      </div>
+      <div class="card">
+        <h3>Account ROI</h3>
+        <div class="value" id="val-account-roi">-</div>
+        <div class="label">value + withdrawn vs. deposited — includes sold stocks</div>
+      </div>
+      <div class="card">
+        <h3>Account CAGR</h3>
+        <div class="value" id="val-account-cagr">-</div>
+        <div class="label">since the first deposit — approximate, ignores deposit timing</div>
+      </div>
+      <div class="card">
+        <h3>XIRR</h3>
+        <div class="value" id="val-xirr">-</div>
+        <div class="label">whole account, timing-weighted</div>
       </div>
     </div>
 
@@ -139,7 +151,7 @@
         <canvas id="investedChart"></canvas>
       </div>
       <div class="chart-container">
-        <h3>Yearly P/L — excl. dividends</h3>
+        <h3>Yearly P/L — realized + unrealized, excl. dividends</h3>
         <canvas id="pnlChart"></canvas>
       </div>
     </div>
@@ -274,6 +286,6 @@
       });
     })();
   </script>
-  <script type="module" src="src/app.js?v=14"></script>
+  <script type="module" src="src/app.js?v=15"></script>
 </body>
 </html>
